@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <future>
 #include <optional>
 #include <stxxl/algorithm>
@@ -1421,6 +1422,10 @@ LangtagAndTriple Index::tripleToInternalRepresentation(Triple&& tripleIn) {
   bool objectShouldBeExternalizedForUniprot = (
     spo[1] == "<http://www.w3.org/1999/02/22-rdf-syntax-ns#value>" ||
     spo[1] == "<http://purl.uniprot.org/core/md5Checksum>"
+    //   (spo[1].starts_with("<http://purl.uniprot.org/core/") &&
+    //    (strcmp(spo[1].c_str() + 30, "md5Checksum>") == 0 ||
+    //     strcmp(spo[1].c_str() + 30, "sequenceFor>") == 0 ||
+    //     strcmp(spo[1].c_str() + 30, "structuredName>") == 0))
   );
 
   size_t upperBound = 3;
