@@ -161,7 +161,7 @@ void VocabularyMerger::writeQueueWordsToIdVec(
                  << '\n';
       } else {
         // we have to strip the externalization character again
-	
+
         auto& c = _lastWritten[0];
         // Keep a copy of the first character to later restore it.
         auto originalFirstChar = c;
