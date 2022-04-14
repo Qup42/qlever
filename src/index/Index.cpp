@@ -956,12 +956,6 @@ LangtagAndTriple Index::tripleToInternalRepresentation(TurtleTriple&& triple) {
     iriOrLiteral = _vocab.getLocaleManager().normalizeUtf8(iriOrLiteral);
   }
 
-  // UNIPROT HACK (Hannah 15.04.2021): Externalize all literals from triples
-  // with predicate <http://www.w3.org/1999/02/22-rdf-syntax-ns#value>
-  bool objectShouldBeExternalizedForUniprot =
-      (spo[1] == "<http://www.w3.org/1999/02/22-rdf-syntax-ns#value>" ||
-       spo[1] == "<http://purl.uniprot.org/core/md5Checksum>");
-
   size_t upperBound = 3;
   auto& object = std::get<TripleComponent>(resultTriple[2])._iriOrLiteral;
   // TODO<joka921> Actually create numeric Ids here...
@@ -975,16 +969,22 @@ LangtagAndTriple Index::tripleToInternalRepresentation(TurtleTriple&& triple) {
     result._langtag = decltype(_vocab)::getLanguage(object);
   }
 
+  // UNIPROT HACK (Hannah 15.04.2021): Additionally, externalize all literals
+  // from triples with these two predicates (this cannot be configured yet in
+  // the settings.json).
+  auto& predicate = std::get<TripleComponent>(resultTriple[1])._iriOrLiteral;
+  bool externalizeObjectDueToPredicate =
+      (predicate == "<http://www.w3.org/1999/02/22-rdf-syntax-ns#value>" ||
+       predicate == "<http://purl.uniprot.org/core/md5Checksum>");
   for (size_t k = 0; k < upperBound; ++k) {
     // If we already have an ID, we can just continue;
     if (!std::holds_alternative<TripleComponent>(resultTriple[k])) {
       continue;
     }
     auto& component = std::get<TripleComponent>(resultTriple[k]);
-    // UNIPROT HACK (Hannah 15.04.2021): See definition of
-    // `objectShouldBeExternalizedForUniprot` above.
-    if (_onDiskLiterals && (_vocab.shouldBeExternalized(spo[k]) ||
-                            (k == 2 && objectShouldBeExternalizedForUniprot))) {
+    if (_onDiskLiterals &&
+        (_vocab.shouldBeExternalized(component._iriOrLiteral) ||
+         (k == 2 && externalizeObjectDueToPredicate))) {
       component._isExternal = true;
     }
   }
