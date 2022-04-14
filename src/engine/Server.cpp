@@ -4,37 +4,28 @@
 
 #include "./Server.h"
 
-#include <algorithm>
 #include <cstring>
-#include <nlohmann/json.hpp>
 #include <sstream>
 #include <string>
-#include <thread>
 #include <vector>
 
-#include "../parser/ParseException.h"
-#include "../util/Log.h"
-#include "../util/StringUtils.h"
-#include "./Server.h"
 #include "QueryPlanner.h"
 
-// _____________________________________________________________________________
-Server::~Server() {
-  if (_initialized) {
-    _serverSocket.close();
-  }
-}
+template <typename T>
+using Awaitable = Server::Awaitable<T>;
 
-// _____________________________________________________________________________
-void Server::initialize(const string& ontologyBaseName, bool useText,
-                        bool usePatterns, bool usePatternTrick) {
-  LOG(INFO) << "Initializing server..." << std::endl;
+// __________________________________________________________________________
+void Server::initialize(const string& indexBaseName, bool useText,
+                        bool usePatterns, bool usePatternTrick,
+                        bool loadAllPermutations) {
+  LOG(INFO) << "Initializing server ..." << std::endl;
 
   _enablePatternTrick = usePatternTrick;
   _index.setUsePatterns(usePatterns);
+  _index.setLoadAllPermutations(loadAllPermutations);
 
   // Init the index.
-  _index.createFromOnDiskIndex(ontologyBaseName);
+  _index.createFromOnDiskIndex(indexBaseName);
   if (useText) {
     _index.addTextFromOnDiskIndex();
   }
@@ -43,404 +34,232 @@ void Server::initialize(const string& ontologyBaseName, bool useText,
       _allocator,
       _index.getNofTriples() * PERCENTAGE_OF_TRIPLES_FOR_SORT_ESTIMATE / 100);
 
-  // Init the server socket.
-  bool ret = _serverSocket.create() && _serverSocket.bind(_port) &&
-             _serverSocket.listen();
-  if (!ret) {
-    LOG(ERROR) << "Failed to create socket on port " << _port << "."
-               << std::endl;
-    exit(1);
-  }
-
   // Set flag.
   _initialized = true;
-  LOG(INFO) << "Done initializing server." << std::endl;
+  LOG(INFO) << "The server is ready" << std::endl;
 }
 
 // _____________________________________________________________________________
-void Server::run() {
-  if (!_initialized) {
-    LOG(ERROR) << "Cannot start an uninitialized server!" << std::endl;
-    exit(1);
-  }
-  std::vector<std::thread> threads;
-  for (int i = 0; i < _numThreads; ++i) {
-    threads.emplace_back(&Server::runAcceptLoop, this);
-  }
-  for (std::thread& worker : threads) {
-    worker.join();
-  }
-}
-// _____________________________________________________________________________
-void Server::runAcceptLoop() {
-  // Loop and wait for queries. Run forever, for now.
-  while (true) {
-    // Wait for new query
-    LOG(INFO) << "---------- WAITING FOR QUERY AT PORT \"" << _port << "\" ... "
-              << std::endl;
+void Server::run(const string& indexBaseName, bool useText, bool usePatterns,
+                 bool usePatternTrick, bool loadAllPermutations) {
+  // First set up the HTTP server, so that it binds to the socket, and
+  // the "socket already in use" error appears quickly.
+  auto httpSessionHandler =
+      [this](auto request, auto&& send) -> boost::asio::awaitable<void> {
+    co_await process(std::move(request), send);
+  };
+  auto httpServer = HttpServer{static_cast<unsigned short>(_port), "0.0.0.0",
+                               _numThreads, std::move(httpSessionHandler)};
 
-    ad_utility::Socket client;
-    // Concurrent accept used to be problematic because of the Thundering Herd
-    // problem but this should be fixed on modern OSs
-    bool success = _serverSocket.acceptClient(&client);
-    if (!success) {
-      LOG(ERROR) << "Socket error in acceot" << std::strerror(errno)
-                 << std::endl;
-      continue;
-    }
-    client.setKeepAlive(true);
-    LOG(INFO) << "Incoming connection, processing..." << std::endl;
-    process(&client);
-    client.close();
-  }
+  // Initialize the index
+  initialize(indexBaseName, useText, usePatterns, usePatternTrick,
+             loadAllPermutations);
+
+  // Start listening for connections on the server.
+  httpServer.run();
 }
 
 // _____________________________________________________________________________
-void Server::process(Socket* client) {
+Awaitable<void> Server::process(
+    const ad_utility::httpUtils::HttpRequest auto& request, auto&& send) {
+  using namespace ad_utility::httpUtils;
   ad_utility::Timer requestTimer;
   requestTimer.start();
-  string contentType;
-  LOG(DEBUG) << "Waiting for receive call to complete." << endl;
-  string request;
-  string response;
-  string headers;
-  string query;
-  client->getHTTPRequest(request, headers);
-  LOG(DEBUG) << "Got request from client with size: " << request.size()
-             << " and headers with total size: " << headers.size() << endl;
 
-  size_t indexOfGET = request.find("GET");
-  size_t indexOfHTTP = request.find("HTTP");
-  size_t upper = indexOfHTTP;
+  auto filenameAndParams = ad_utility::UrlParser::parseTarget(request.target());
+  const auto& params = filenameAndParams._parameters;
 
-  if (indexOfGET != request.npos && indexOfHTTP != request.npos) {
-    size_t indexOfQuest = request.find("?", indexOfGET);
-    if (indexOfQuest != string::npos && indexOfQuest < indexOfHTTP) {
-      upper = indexOfQuest + 1;
+  auto sendWithCors = [&send](auto response) -> boost::asio::awaitable<void> {
+    response.set(http::field::access_control_allow_origin, "*");
+    co_return co_await send(std::move(response));
+  };
+
+  // If there is a command like "clear_cache" which might be combined with a
+  // query, track if there is such a command but no query and still send
+  // a useful response.
+  std::optional<http::response<http::string_body>> responseFromCommand;
+  if (params.contains("cmd")) {
+    const auto& cmd = params.at("cmd");
+    if (cmd == "stats") {
+      LOG(INFO) << "Supplying index stats..." << std::endl;
+      auto response = createJsonResponse(composeStatsJson(), request);
+      co_return co_await sendWithCors(std::move(response));
+    } else if (cmd == "cache-stats") {
+      LOG(INFO) << "Supplying cache stats..." << std::endl;
+      auto response = createJsonResponse(composeCacheStatsJson(), request);
+      co_return co_await sendWithCors(std::move(response));
+    } else if (cmd == "clear-cache") {
+      LOG(INFO) << "Clearing the cache, unpinned elements only" << std::endl;
+      _cache.clearUnpinnedOnly();
+      responseFromCommand =
+          createJsonResponse(composeCacheStatsJson(), request);
+    } else if (cmd == "clear-cache-complete") {
+      LOG(INFO) << "Clearing the cache completely, including unpinned elements"
+                << std::endl;
+      _cache.clearAll();
+      responseFromCommand =
+          createJsonResponse(composeCacheStatsJson(), request);
+    } else if (cmd == "get-settings") {
+      LOG(INFO) << "Supplying settings..." << std::endl;
+      json settingsJson = RuntimeParameters().toMap();
+      co_await sendWithCors(createJsonResponse(settingsJson, request));
+      co_return;
+    } else {
+      co_await sendWithCors(createBadRequestResponse(
+          R"(Unknown value for query parameter "cmd": ")" + cmd + '\"',
+          request));
+      co_return;
     }
-    string file = request.substr(indexOfGET + 5, upper - (indexOfGET + 5) - 1);
-    if (file.size() == 0) {
-      if (request[indexOfGET + 5] != '?') {
-        file = "index.html";
-      }
-    }
-    // Use hardcoded white-listing for index.html and style.css
-    // can be changed if more should ever be needed, for now keep it simple.
-    if (file.size() > 0) {
-      LOG(DEBUG) << "file: " << file << '\n';
-      if (file == "index.html" || file == "style.css" || file == "script.js") {
-        serveFile(client, file);
-        return;
-      } else {
-        LOG(INFO) << "Responding with 404 for file " << file << '\n';
-        auto bytesSent = client->send(create404HttpResponse());
-        LOG(DEBUG) << "Sent " << bytesSent << " bytes." << std::endl;
-        return;
-      }
-    }
-
-    try {
-      ParamValueMap params = parseHttpRequest(request);
-
-      if (ad_utility::getLowercase(params["cmd"]) == "stats") {
-        LOG(INFO) << "Supplying index stats..." << std::endl;
-        auto statsJson = composeStatsJson();
-        contentType = "application/json";
-        string httpResponse = createHttpResponse(statsJson, contentType);
-        auto bytesSent = client->send(httpResponse);
-        LOG(DEBUG) << "Sent " << bytesSent << " bytes." << std::endl;
-        LOG(INFO) << "Sent stats to client." << std::endl;
-        return;
-      }
-
-      if (ad_utility::getLowercase(params["cmd"]) == "cachestats") {
-        LOG(INFO) << "Supplying cache stats..." << std::endl;
-        auto statsJson = composeCacheStatsJson();
-        contentType = "application/json";
-        string httpResponse = createHttpResponse(statsJson.dump(), contentType);
-        auto bytesSent = client->send(httpResponse);
-        LOG(DEBUG) << "Sent " << bytesSent << " bytes." << std::endl;
-        LOG(INFO) << "Sent cache stats to client." << std::endl;
-        return;
-      }
-
-      if (ad_utility::getLowercase(params["cmd"]) == "clearcache") {
-        _cache.clearUnpinnedOnly();
-      }
-
-      if (ad_utility::getLowercase(params["cmd"]) == "clearcachecomplete") {
-        auto lock = _pinnedSizes.wlock();
-        _cache.clearAll();
-        lock->clear();
-      }
-
-      ad_utility::SharedConcurrentTimeoutTimer timeoutTimer =
-          std::make_shared<ad_utility::ConcurrentTimeoutTimer>(
-              ad_utility::TimeoutTimer::unlimited());
-      if (params.contains("timeout")) {
-        timeoutTimer = std::make_shared<ad_utility::ConcurrentTimeoutTimer>(
-            ad_utility::TimeoutTimer::fromSeconds(
-                atof(params["timeout"].c_str())));
-      }
-
-      auto it = params.find("send");
-      size_t maxSend = MAX_NOF_ROWS_IN_RESULT;
-      if (it != params.end()) {
-        maxSend = static_cast<size_t>(atol(it->second.c_str()));
-      }
-#ifdef ALLOW_SHUTDOWN
-      if (ad_utility::getLowercase(params["cmd"]) == "shutdown") {
-        LOG(INFO) << "Shutdown triggered by HTTP request "
-                  << "(deactivate by compiling without -DALLOW_SHUTDOWN)"
-                  << std::endl;
-        exit(0);
-      }
-#endif
-      const bool pinSubtrees =
-          ad_utility::getLowercase(params["pinsubtrees"]) == "true";
-      const bool pinResult =
-          ad_utility::getLowercase(params["pinresult"]) == "true";
-      query = createQueryFromHttpParams(params);
-      LOG(INFO) << "Query" << ((pinSubtrees) ? " (Cache pinned)" : "")
-                << ((pinResult) ? " (Result pinned)" : "") << ": " << query
-                << '\n';
-      ParsedQuery pq = SparqlParser(query).parse();
-      pq.expandPrefixes();
-
-      QueryExecutionContext qec(_index, _engine, &_cache, &_pinnedSizes,
-                                _allocator, _sortPerformanceEstimator,
-                                pinSubtrees, pinResult);
-      // start the shared timeout timer here to also include
-      // the query planning
-      timeoutTimer->wlock()->start();
-
-      QueryPlanner qp(&qec);
-      qp.setEnablePatternTrick(_enablePatternTrick);
-      QueryExecutionTree qet = qp.createExecutionTree(pq);
-      qet.isRoot() = true;  // allow pinning of the final result
-      qet.recursivelySetTimeoutTimer(timeoutTimer);
-      LOG(TRACE) << qet.asString() << std::endl;
-
-      if (ad_utility::getLowercase(params["action"]) == "csv_export") {
-        // CSV export
-        response = composeResponseSepValues(pq, qet, ',');
-        contentType =
-            "text/csv\r\n"
-            "Content-Disposition: attachment;filename=export.csv";
-      } else if (ad_utility::getLowercase(params["action"]) == "tsv_export") {
-        // TSV export
-        response = composeResponseSepValues(pq, qet, '\t');
-        contentType =
-            "text/tab-separated-values\r\n"
-            "Content-Disposition: attachment;filename=export.tsv";
-      } else if (ad_utility::getLowercase(params["action"]) ==
-                 "binary_export") {
-        // binary export
-        response = composeResponseSepValues(pq, qet, 'b');
-        contentType =
-            "application/octet-stream\r\n"
-            "Content-Disposition: attachment;filename=export.dat";
-      } else {
-        // Normal case: JSON response
-        response = composeResponseJson(pq, qet, requestTimer, maxSend);
-        contentType = "application/json";
-      }
-      // Print the runtime info. This needs to be done after the query
-      // was computed.
-      LOG(INFO) << '\n' << qet.getRootOperation()->getRuntimeInfo().toString();
-    } catch (const std::exception& e) {
-      response = composeResponseJson(query, e, requestTimer);
-    }
-    string httpResponse = createHttpResponse(response, contentType);
-    auto bytesSent = client->send(httpResponse);
-    LOG(DEBUG) << "Sent " << bytesSent << " bytes." << std::endl;
-  } else {
-    LOG(INFO) << "Got invalid request " << request << '\n';
-    LOG(INFO) << "Responding with 400 Bad Request.\n";
-    auto bytesSent = client->send(create400HttpResponse());
-    LOG(DEBUG) << "Sent " << bytesSent << " bytes." << std::endl;
   }
+
+  // TODO<joka921> Restrict this access by a token.
+  // TODO<joka921> Warn about unknown parameters
+  bool anyParamWasChanged = false;
+  for (const auto& [key, value] : params) {
+    if (RuntimeParameters().getKeys().contains(key)) {
+      RuntimeParameters().set(key, value);
+      anyParamWasChanged = true;
+    }
+  }
+
+  if (anyParamWasChanged) {
+    json settingsJson = RuntimeParameters().toMap();
+    responseFromCommand = createJsonResponse(settingsJson, request);
+  }
+
+  if (params.contains("query")) {
+    if (params.at("query").empty()) {
+      co_return co_await sendWithCors(createBadRequestResponse(
+          "Parameter \"query\" must not have an empty value", request));
+    }
+
+    co_return co_await processQuery(params, requestTimer, std::move(request),
+                                    sendWithCors);
+  } else if (responseFromCommand.has_value()) {
+    co_return co_await sendWithCors(std::move(responseFromCommand.value()));
+  }
+
+  // Neither a query nor a command were specified, simply serve a file.
+  // Note that `makeFileServer` returns a function.
+  // The first argument is the document root, the second one is the whitelist.
+  co_await makeFileServer(".", ad_utility::HashSet<std::string>{
+                                   "index.html", "script.js",
+                                   "style.css"})(std::move(request), send);
 }
 
 // _____________________________________________________________________________
-Server::ParamValueMap Server::parseHttpRequest(
-    const string& httpRequest) const {
-  LOG(DEBUG) << "Parsing HTTP Request." << endl;
-  ParamValueMap params;
-  // Parse the HTTP Request.
-
-  size_t indexOfGET = httpRequest.find("GET");
-  size_t indexOfHTTP = httpRequest.find("HTTP");
-
-  if (indexOfGET == httpRequest.npos || indexOfHTTP == httpRequest.npos) {
-    AD_THROW(ad_semsearch::Exception::BAD_REQUEST,
-             "Invalid request. Only supporting proper HTTP GET requests!\n" +
-                 httpRequest);
-  }
-
-  string request =
-      httpRequest.substr(indexOfGET + 3, indexOfHTTP - (indexOfGET + 3));
-
-  size_t index = request.find("?");
-  if (index == request.npos) {
-    AD_THROW(ad_semsearch::Exception::BAD_REQUEST,
-             "Invalid request. At least one parameters is "
-             "required for meaningful queries!\n" +
-                 httpRequest);
-  }
-  size_t next = request.find('&', index + 1);
-  while (next != request.npos) {
-    size_t posOfEq = request.find('=', index + 1);
-    if (posOfEq == request.npos) {
-      AD_THROW(ad_semsearch::Exception::BAD_REQUEST,
-               "Parameter without \"=\" in HTTP Request.\n" + httpRequest);
-    }
-    string param = ad_utility::getLowercaseUtf8(
-        request.substr(index + 1, posOfEq - (index + 1)));
-    string value = ad_utility::decodeUrl(
-        request.substr(posOfEq + 1, next - (posOfEq + 1)));
-    if (params.count(param) > 0) {
-      AD_THROW(ad_semsearch::Exception::BAD_REQUEST,
-               "Duplicate HTTP parameter: " + param);
-    }
-    params[param] = value;
-    index = next;
-    next = request.find('&', index + 1);
-  }
-  size_t posOfEq = request.find('=', index + 1);
-  if (posOfEq == request.npos) {
-    AD_THROW(ad_semsearch::Exception::BAD_REQUEST,
-             "Parameter without \"=\" in HTTP Request." + httpRequest);
-  }
-  string param = ad_utility::getLowercaseUtf8(
-      request.substr(index + 1, posOfEq - (index + 1)));
-  string value = ad_utility::decodeUrl(
-      request.substr(posOfEq + 1, request.size() - 1 - (posOfEq + 1)));
-  if (params.count(param) > 0) {
-    AD_THROW(ad_semsearch::Exception::BAD_REQUEST, "Duplicate HTTP parameter.");
-  }
-  params[param] = value;
-
-  LOG(DEBUG) << "Done parsing HTTP Request." << endl;
-  return params;
-}
-
-// _____________________________________________________________________________
-string Server::createQueryFromHttpParams(const ParamValueMap& params) const {
-  string query;
-  // Construct a Query object from the parsed request.
-  auto it = params.find("query");
-  if (it == params.end() || it->second == "") {
-    AD_THROW(ad_semsearch::Exception::BAD_REQUEST,
-             "Expected at least one non-empty attribute \"query\".");
-  }
-  return it->second;
-}
-
-// _____________________________________________________________________________
-string Server::createHttpResponse(const string& content,
-                                  const string& contentType) const {
-  std::ostringstream os;
-  os << "HTTP/1.1 200 OK\r\n"
-     << "Content-Length: " << content.size() << "\r\n"
-     << "Connection: close\r\n"
-     << "Content-Type: " << contentType << "; charset="
-     << "utf-8"
-     << "\r\n"
-     << "Access-Control-Allow-Origin: *"
-     << "\r\n"
-     << "\r\n"
-     << content;
-  return os.str();
-}
-
-// _____________________________________________________________________________
-string Server::create404HttpResponse() const {
-  std::ostringstream os;
-  os << "HTTP/1.1 404 Not Found\r\n"
-     << "Content-Length: 0\r\n"
-     << "Connection: close\r\n"
-     << "\r\n";
-  return os.str();
-}
-
-// _____________________________________________________________________________
-string Server::create400HttpResponse() const {
-  std::ostringstream os;
-  os << "HTTP/1.1 400 Bad Request\r\n"
-     << "Content-Length: 0\r\n"
-     << "Connection: close\r\n"
-     << "\r\n";
-  return os.str();
-}
-
-// _____________________________________________________________________________
-string Server::composeResponseJson(const ParsedQuery& query,
-                                   const QueryExecutionTree& qet,
-                                   ad_utility::Timer& requestTimer,
-                                   size_t maxSend) const {
-  shared_ptr<const ResultTable> rt = qet.getResult();
-  requestTimer.stop();
-  off_t compResultUsecs = requestTimer.usecs();
-  size_t resultSize = rt->size();
-
-  nlohmann::json j;
-
-  j["query"] = query._originalString;
-  j["status"] = "OK";
-  j["resultsize"] = resultSize;
-  j["warnings"] = qet.collectWarnings();
-  j["selected"] = query._selectClause._selectedVariables;
-
-  j["runtimeInformation"] = RuntimeInformation::ordered_json(
-      qet.getRootOperation()->getRuntimeInfo());
-
-  {
-    size_t limit = MAX_NOF_ROWS_IN_RESULT;
-    size_t offset = 0;
-    if (query._limit.size() > 0) {
-      limit = static_cast<size_t>(atol(query._limit.c_str()));
-    }
-    if (query._offset.size() > 0) {
-      offset = static_cast<size_t>(atol(query._offset.c_str()));
-    }
-    requestTimer.cont();
-    j["res"] = qet.writeResultAsJson(query._selectClause._selectedVariables,
-                                     std::min(limit, maxSend), offset);
+Awaitable<json> Server::composeResponseQleverJson(
+    const ParsedQuery& query, const QueryExecutionTree& qet,
+    ad_utility::Timer& requestTimer, size_t maxSend) const {
+  auto compute = [&, maxSend] {
+    shared_ptr<const ResultTable> resultTable = qet.getResult();
     requestTimer.stop();
-  }
+    off_t compResultUsecs = requestTimer.usecs();
+    size_t resultSize = resultTable->size();
 
-  requestTimer.stop();
-  j["time"]["total"] = std::to_string(requestTimer.usecs() / 1000.0) + "ms";
-  j["time"]["computeResult"] = std::to_string(compResultUsecs / 1000.0) + "ms";
+    nlohmann::json j;
 
-  return j.dump(4);
+    j["query"] = query._originalString;
+    j["status"] = "OK";
+    j["warnings"] = qet.collectWarnings();
+    if (query.hasSelectClause()) {
+      j["selected"] =
+          query.selectClause()._varsOrAsterisk.getSelectedVariables();
+    } else {
+      j["selected"] =
+          std::vector<std::string>{"?subject", "?predicate", "?object"};
+    }
+
+    j["runtimeInformation"] = RuntimeInformation::ordered_json(
+        qet.getRootOperation()->getRuntimeInfo());
+
+    {
+      size_t limit =
+          std::min(query._limit.value_or(MAX_NOF_ROWS_IN_RESULT), maxSend);
+      size_t offset = query._offset.value_or(0);
+      requestTimer.cont();
+      j["res"] = query.hasSelectClause()
+                     ? qet.writeResultAsQLeverJson(
+                           query.selectClause()._varsOrAsterisk, limit, offset,
+                           std::move(resultTable))
+                     : qet.writeRdfGraphJson(query.constructClause(), limit,
+                                             offset, std::move(resultTable));
+      requestTimer.stop();
+    }
+    j["resultsize"] = query.hasSelectClause() ? resultSize : j["res"].size();
+
+    requestTimer.stop();
+    j["time"]["total"] =
+        std::to_string(static_cast<double>(requestTimer.usecs()) / 1000.0) +
+        "ms";
+    j["time"]["computeResult"] =
+        std::to_string(static_cast<double>(compResultUsecs) / 1000.0) + "ms";
+
+    return j;
+  };
+  return computeInNewThread(compute);
 }
 
 // _____________________________________________________________________________
-string Server::composeResponseSepValues(const ParsedQuery& query,
-                                        const QueryExecutionTree& qet,
-                                        char sep) const {
-  std::ostringstream os;
-  size_t limit = std::numeric_limits<size_t>::max();
-  size_t offset = 0;
-  if (query._limit.size() > 0) {
-    limit = static_cast<size_t>(atol(query._limit.c_str()));
+Awaitable<json> Server::composeResponseSparqlJson(
+    const ParsedQuery& query, const QueryExecutionTree& qet,
+    ad_utility::Timer& requestTimer, size_t maxSend) const {
+  if (!query.hasSelectClause()) {
+    throw std::runtime_error{
+        "SPARQL-compliant JSON format is only supported for SELECT queries"};
   }
-  if (query._offset.size() > 0) {
-    offset = static_cast<size_t>(atol(query._offset.c_str()));
-  }
-  qet.writeResultToStream(os, query._selectClause._selectedVariables, limit,
-                          offset, sep);
+  auto compute = [&, maxSend] {
+    shared_ptr<const ResultTable> resultTable = qet.getResult();
+    requestTimer.stop();
+    nlohmann::json j;
+    size_t limit =
+        std::min(query._limit.value_or(MAX_NOF_ROWS_IN_RESULT), maxSend);
+    size_t offset = query._offset.value_or(0);
+    requestTimer.cont();
+    j = qet.writeResultAsSparqlJson(query.selectClause()._varsOrAsterisk, limit,
+                                    offset, std::move(resultTable));
 
-  return os.str();
+    requestTimer.stop();
+    return j;
+  };
+  return computeInNewThread(compute);
 }
 
 // _____________________________________________________________________________
-string Server::composeResponseJson(const string& query,
-                                   const std::exception& exception,
-                                   ad_utility::Timer& requestTimer) const {
-  std::ostringstream os;
+template <QueryExecutionTree::ExportSubFormat format>
+Awaitable<ad_utility::streams::stream_generator>
+Server::composeResponseSepValues(const ParsedQuery& query,
+                                 const QueryExecutionTree& qet) const {
+  auto compute = [&] {
+    size_t limit = query._limit.value_or(MAX_NOF_ROWS_IN_RESULT);
+    size_t offset = query._offset.value_or(0);
+    return query.hasSelectClause()
+               ? qet.generateResults<format>(
+                     query.selectClause()._varsOrAsterisk, limit, offset)
+               : qet.writeRdfGraphSeparatedValues<format>(
+                     query.constructClause(), limit, offset, qet.getResult());
+  };
+  return computeInNewThread(compute);
+}
+
+// _____________________________________________________________________________
+
+ad_utility::streams::stream_generator Server::composeTurtleResponse(
+    const ParsedQuery& query, const QueryExecutionTree& qet) {
+  if (!query.hasConstructClause()) {
+    throw std::runtime_error{
+        "RDF Turtle as an export format is only supported for CONSTRUCT "
+        "queries"};
+  }
+  size_t limit = query._limit.value_or(MAX_NOF_ROWS_IN_RESULT);
+  size_t offset = query._offset.value_or(0);
+  return qet.writeRdfGraphTurtle(query.constructClause(), limit, offset,
+                                 qet.getResult());
+}
+
+// _____________________________________________________________________________
+json Server::composeExceptionJson(const string& query, const std::exception& e,
+                                  ad_utility::Timer& requestTimer) {
   requestTimer.stop();
 
   json j;
@@ -449,74 +268,30 @@ string Server::composeResponseJson(const string& query,
   j["resultsize"] = 0;
   j["time"]["total"] = requestTimer.msecs();
   j["time"]["computeResult"] = requestTimer.msecs();
-  j["exception"] = exception.what();
-  return j.dump(4);
+  j["exception"] = e.what();
+  return j;
 }
 
 // _____________________________________________________________________________
-void Server::serveFile(Socket* client, const string& requestedFile) const {
-  string contentString;
-  string contentType = "text/plain";
-  string statusString = "HTTP/1.0 200 OK";
-
-  // CASE: file.
-  LOG(DEBUG) << "Looking for file: \"" << requestedFile << "\" ... \n";
-  std::ifstream in(requestedFile.c_str());
-  if (!in) {
-    statusString = "HTTP/1.0 404 NOT FOUND";
-    contentString = "404 NOT FOUND";
-  } else {
-    // File into string
-    contentString = string((std::istreambuf_iterator<char>(in)),
-                           std::istreambuf_iterator<char>());
-    // Set content type
-    if (ad_utility::endsWith(requestedFile, ".html")) {
-      contentType = "text/html";
-    } else if (ad_utility::endsWith(requestedFile, ".css")) {
-      contentType = "text/css";
-    } else if (ad_utility::endsWith(requestedFile, ".js")) {
-      contentType = "application/javascript";
-    }
-    in.close();
-  }
-
-  size_t contentLength = contentString.size();
-  std::ostringstream headerStream;
-  headerStream << statusString << "\r\n"
-               << "Content-Length: " << contentLength << "\r\n"
-               << "Content-Type: " << contentType << "\r\n"
-               << "Access-Control-Allow-Origin: *\r\n"
-               << "Connection: close\r\n"
-               << "\r\n";
-
-  string data = headerStream.str();
-  data += contentString;
-  client->send(data);
-}
-
-// _____________________________________________________________________________
-string Server::composeStatsJson() const {
-  std::ostringstream os;
-  os << "{\n"
-     << "\"kbindex\": \"" << _index.getKbName() << "\",\n"
-     << "\"permutations\": \"" << (_index.hasAllPermutations() ? "6" : "2")
-     << "\",\n";
+json Server::composeStatsJson() const {
+  json result;
+  result["kbindex"] = _index.getKbName();
+  result["permutations"] = (_index.hasAllPermutations() ? 6 : 2);
   if (_index.hasAllPermutations()) {
-    os << "\"nofsubjects\": \"" << _index.getNofSubjects() << "\",\n";
-    os << "\"nofpredicates\": \"" << _index.getNofPredicates() << "\",\n";
-    os << "\"nofobjects\": \"" << _index.getNofObjects() << "\",\n";
+    result["nofsubjects"] = _index.getNofSubjects();
+    result["nofpredicates"] = _index.getNofPredicates();
+    result["nofobjects"] = _index.getNofObjects();
   }
 
   auto [actualTriples, addedTriples] = _index.getNumTriplesActuallyAndAdded();
-  os << "\"noftriples\": \"" << _index.getNofTriples() << "\",\n"
-     << "\"nofActualTriples\": \"" << actualTriples << "\",\n"
-     << "\"nofAddedTriples\": \"" << addedTriples << "\",\n"
-     << "\"textindex\": \"" << _index.getTextName() << "\",\n"
-     << "\"nofrecords\": \"" << _index.getNofTextRecords() << "\",\n"
-     << "\"nofwordpostings\": \"" << _index.getNofWordPostings() << "\",\n"
-     << "\"nofentitypostings\": \"" << _index.getNofEntityPostings() << "\"\n"
-     << "}\n";
-  return os.str();
+  result["noftriples"] = _index.getNofTriples();
+  result["nofActualTriples"] = actualTriples;
+  result["nofAddedTriples"] = addedTriples;
+  result["textindex"] = _index.getTextName();
+  result["nofrecords"] = _index.getNofTextRecords();
+  result["nofwordpostings"] = _index.getNofWordPostings();
+  result["nofentitypostings"] = _index.getNofEntityPostings();
+  return result;
 }
 
 // _______________________________________
@@ -526,6 +301,181 @@ nlohmann::json Server::composeCacheStatsJson() const {
   result["num-pinned-entries"] = _cache.numPinnedEntries();
   result["non-pinned-size"] = _cache.nonPinnedSize();
   result["pinned-size"] = _cache.pinnedSize();
-  result["num-pinned-index-scan-sizes"] = _pinnedSizes.rlock()->size();
+  result["num-pinned-index-scan-sizes"] = _cache.pinnedSizes().rlock()->size();
   return result;
+}
+
+// ____________________________________________________________________________
+boost::asio::awaitable<void> Server::processQuery(
+    const ParamValueMap& params, ad_utility::Timer& requestTimer,
+    const ad_utility::httpUtils::HttpRequest auto& request, auto&& send) {
+  using namespace ad_utility::httpUtils;
+  AD_CHECK(params.contains("query"));
+  const auto& query = params.at("query");
+  AD_CHECK(!query.empty());
+
+  auto sendJson = [&request, &send](
+                      const json& jsonString,
+                      http::status status =
+                          http::status::ok) -> boost::asio::awaitable<void> {
+    auto response = createJsonResponse(jsonString, request, status);
+    co_return co_await send(std::move(response));
+  };
+
+  std::optional<json> errorResponse;
+
+  try {
+    ad_utility::SharedConcurrentTimeoutTimer timeoutTimer =
+        std::make_shared<ad_utility::ConcurrentTimeoutTimer>(
+            ad_utility::TimeoutTimer::unlimited());
+    if (params.contains("timeout")) {
+      timeoutTimer = std::make_shared<ad_utility::ConcurrentTimeoutTimer>(
+          ad_utility::TimeoutTimer::fromSeconds(
+              std::stof(params.at("timeout"))));
+    }
+
+    auto containsParam = [&params](const std::string& param,
+                                   const std::string& expected) {
+      return params.contains(param) && params.at(param) == expected;
+    };
+    size_t maxSend = params.contains("send") ? std::stoul(params.at("send"))
+                                             : MAX_NOF_ROWS_IN_RESULT;
+    const bool pinSubtrees = containsParam("pinsubtrees", "true");
+    const bool pinResult = containsParam("pinresult", "true");
+    LOG(INFO) << "Query" << ((pinSubtrees) ? " (Cache pinned)" : "")
+              << ((pinResult) ? " (Result pinned)" : "") << ": " << query
+              << '\n';
+    ParsedQuery pq = SparqlParser(query).parse();
+    pq.expandPrefixes();
+
+    QueryExecutionContext qec(_index, _engine, &_cache, _allocator,
+                              _sortPerformanceEstimator, pinSubtrees,
+                              pinResult);
+    // start the shared timeout timer here to also include
+    // the query planning
+    timeoutTimer->wlock()->start();
+
+    QueryPlanner qp(&qec);
+    qp.setEnablePatternTrick(_enablePatternTrick);
+    QueryExecutionTree qet = qp.createExecutionTree(pq);
+    qet.isRoot() = true;  // allow pinning of the final result
+    qet.recursivelySetTimeoutTimer(timeoutTimer);
+    LOG(TRACE) << qet.asString() << std::endl;
+
+    using ad_utility::MediaType;
+    // Determine the result media type.
+
+    // TODO<joka921> qleverJson should not be the default as soon
+    // as the UI explicitly requests it.
+    // TODO<joka921> Add sparqlJson as soon as it is supported.
+    const auto supportedMediaTypes = []() {
+      static const std::vector<MediaType> mediaTypes{
+          ad_utility::MediaType::qleverJson,
+          ad_utility::MediaType::sparqlJson,
+          ad_utility::MediaType::tsv,
+          ad_utility::MediaType::csv,
+          ad_utility::MediaType::turtle,
+          ad_utility::MediaType::octetStream};
+      return mediaTypes;
+    };
+
+    std::optional<MediaType> mediaType = std::nullopt;
+
+    // The explicit `action=..._export` parameter have precedence over the
+    // `Accept:...` header field
+    if (containsParam("action", "csv_export")) {
+      mediaType = ad_utility::MediaType::csv;
+    } else if (containsParam("action", "tsv_export")) {
+      mediaType = ad_utility::MediaType::tsv;
+    } else if (containsParam("action", "qlever_json_export")) {
+      mediaType = ad_utility::MediaType::qleverJson;
+    } else if (containsParam("action", "sparql_json_export")) {
+      mediaType = ad_utility::MediaType::sparqlJson;
+    } else if (containsParam("action", "turtle_export")) {
+      mediaType = ad_utility::MediaType::turtle;
+    } else if (containsParam("action", "binary_export")) {
+      mediaType = ad_utility::MediaType::octetStream;
+    }
+
+    std::string_view acceptHeader = request.base()[http::field::accept];
+
+    if (!mediaType.has_value()) {
+      mediaType = ad_utility::getMediaTypeFromAcceptHeader(
+          acceptHeader, supportedMediaTypes());
+    }
+
+    if (!mediaType.has_value()) {
+      co_return co_await send(createBadRequestResponse(
+          "Did not find any supported media type "
+          "in this \'Accept:\' header field: \"" +
+              std::string{acceptHeader} + "\". " +
+              ad_utility::getErrorMessageForSupportedMediaTypes(
+                  supportedMediaTypes()),
+          request));
+    }
+
+    AD_CHECK(mediaType.has_value());
+    switch (mediaType.value()) {
+      case ad_utility::MediaType::csv: {
+        auto responseGenerator = co_await composeResponseSepValues<
+            QueryExecutionTree::ExportSubFormat::CSV>(pq, qet);
+
+        auto response = createOkResponse(std::move(responseGenerator), request,
+                                         ad_utility::MediaType::csv);
+        co_await send(std::move(response));
+
+      } break;
+      case ad_utility::MediaType::tsv: {
+        auto responseGenerator = co_await composeResponseSepValues<
+            QueryExecutionTree::ExportSubFormat::TSV>(pq, qet);
+
+        auto response = createOkResponse(std::move(responseGenerator), request,
+                                         ad_utility::MediaType::tsv);
+        co_await send(std::move(response));
+      } break;
+      case ad_utility::MediaType::octetStream: {
+        auto responseGenerator = co_await composeResponseSepValues<
+            QueryExecutionTree::ExportSubFormat::BINARY>(pq, qet);
+
+        auto response = createOkResponse(std::move(responseGenerator), request,
+                                         ad_utility::MediaType::octetStream);
+        co_await send(std::move(response));
+      } break;
+      case ad_utility::MediaType::qleverJson: {
+        // Normal case: JSON response
+        auto responseString =
+            co_await composeResponseQleverJson(pq, qet, requestTimer, maxSend);
+        co_await sendJson(std::move(responseString));
+      } break;
+      case ad_utility::MediaType::turtle: {
+        auto responseGenerator = composeTurtleResponse(pq, qet);
+
+        auto response = createOkResponse(std::move(responseGenerator), request,
+                                         ad_utility::MediaType::turtle);
+        co_await send(std::move(response));
+      } break;
+      case ad_utility::MediaType::sparqlJson: {
+        auto responseString =
+            co_await composeResponseSparqlJson(pq, qet, requestTimer, maxSend);
+        co_await sendJson(std::move(responseString));
+      } break;
+      default:
+        // This should never happen, because we have carefully restricted the
+        // subset of mediaTypes that can occur here.
+        AD_CHECK(false);
+    }
+    // Print the runtime info. This needs to be done after the query
+    // was computed.
+
+    LOG(INFO) << "\nRuntime Info:\n"
+              << qet.getRootOperation()->getRuntimeInfo().toString();
+  } catch (const ad_semsearch::Exception& e) {
+    errorResponse = composeExceptionJson(query, e, requestTimer);
+  } catch (const std::exception& e) {
+    errorResponse = composeExceptionJson(query, e, requestTimer);
+  }
+  if (errorResponse.has_value()) {
+    co_return co_await sendJson(errorResponse.value(),
+                                http::status::bad_request);
+  }
 }

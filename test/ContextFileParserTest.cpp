@@ -27,38 +27,33 @@ TEST(ContextFileParserTest, getLineTest) {
   ASSERT_TRUE(p.getLine(a));
   ASSERT_EQ("foo", a._word);
   ASSERT_FALSE(a._isEntity);
-  ASSERT_EQ(0u, a._contextId);
+  ASSERT_EQ(0u, a._contextId.get());
   ASSERT_EQ(2u, a._score);
 
   ASSERT_TRUE(p.getLine(a));
   ASSERT_EQ("foo", a._word);
   ASSERT_FALSE(a._isEntity);
-  ASSERT_EQ(0u, a._contextId);
+  ASSERT_EQ(0u, a._contextId.get());
   ASSERT_EQ(2u, a._score);
 
   ASSERT_TRUE(p.getLine(a));
   ASSERT_EQ("Bär", a._word);
   ASSERT_TRUE(a._isEntity);
-  ASSERT_EQ(0u, a._contextId);
+  ASSERT_EQ(0u, a._contextId.get());
   ASSERT_EQ(1u, a._score);
 
   ASSERT_TRUE(p.getLine(a));
   ASSERT_EQ("äü", a._word);
   ASSERT_FALSE(a._isEntity);
-  ASSERT_EQ(0u, a._contextId);
+  ASSERT_EQ(0u, a._contextId.get());
   ASSERT_EQ(1u, a._score);
 
   ASSERT_TRUE(p.getLine(a));
   ASSERT_EQ("x", a._word);
   ASSERT_FALSE(a._isEntity);
-  ASSERT_EQ(1u, a._contextId);
+  ASSERT_EQ(1u, a._contextId.get());
   ASSERT_EQ(1u, a._score);
 
   ASSERT_FALSE(p.getLine(a));
   remove("_testtmp.contexts.tsv");
 };
-
-int main(int argc, char** argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}

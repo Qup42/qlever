@@ -39,7 +39,7 @@ Union::Union(QueryExecutionContext* qec,
   }
 }
 
-string Union::asString(size_t indent) const {
+string Union::asStringImpl(size_t indent) const {
   std::ostringstream os;
   os << _subtrees[0]->asString(indent) << "\n";
   for (size_t i = 0; i < indent; ++i) {
@@ -47,7 +47,7 @@ string Union::asString(size_t indent) const {
   }
   os << "UNION\n";
   os << _subtrees[1]->asString(indent) << "\n";
-  return os.str();
+  return std::move(os).str();
 }
 
 string Union::getDescriptor() const { return "Union"; }
@@ -146,12 +146,12 @@ void Union::computeResult(ResultTable* result) {
       result->_resultTypes.push_back(ResultTable::ResultType::KB);
     }
   }
-  result->_data.setCols(getResultWidth());
-  int leftWidth = subRes1->_data.cols();
-  int rightWidth = subRes2->_data.cols();
-  int outWidth = result->_data.cols();
+  result->_idTable.setCols(getResultWidth());
+  int leftWidth = subRes1->_idTable.cols();
+  int rightWidth = subRes2->_idTable.cols();
+  int outWidth = result->_idTable.cols();
   CALL_FIXED_SIZE_3(leftWidth, rightWidth, outWidth, computeUnion,
-                    &result->_data, subRes1->_data, subRes2->_data,
+                    &result->_idTable, subRes1->_idTable, subRes2->_idTable,
                     _columnOrigins);
 
   LOG(DEBUG) << "Union result computation done." << std::endl;

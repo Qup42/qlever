@@ -7,10 +7,12 @@
 #include <sstream>
 #include <string>
 
+#include "../index/TriplesView.h"
+
 using std::string;
 
 // _____________________________________________________________________________
-string IndexScan::asString(size_t indent) const {
+string IndexScan::asStringImpl(size_t indent) const {
   std::ostringstream os;
   for (size_t i = 0; i < indent; ++i) {
     os << ' ';
@@ -65,7 +67,7 @@ string IndexScan::asString(size_t indent) const {
       os << "SCAN FOR FULL INDEX OPS (DUMMY OPERATION)";
       break;
   }
-  return os.str();
+  return std::move(os).str();
 }
 
 // _____________________________________________________________________________
@@ -253,54 +255,63 @@ void IndexScan::computeResult(ResultTable* result) {
       computeOPSfreeP(result);
       break;
     case FULL_INDEX_SCAN_SPO:
+      computeFullScan(result, getIndex().SPO());
+      break;
     case FULL_INDEX_SCAN_SOP:
+      computeFullScan(result, getIndex().SOP());
+      break;
     case FULL_INDEX_SCAN_PSO:
+      computeFullScan(result, getIndex().PSO());
+      break;
     case FULL_INDEX_SCAN_POS:
+      computeFullScan(result, getIndex().POS());
+      break;
     case FULL_INDEX_SCAN_OSP:
+      computeFullScan(result, getIndex().OSP());
+      break;
     case FULL_INDEX_SCAN_OPS:
-      AD_THROW(ad_semsearch::Exception::CHECK_FAILED,
-               "Asked to execute a scan for the full index. "
-               "This should never happen.");
+      computeFullScan(result, getIndex().OPS());
+      break;
   }
   LOG(DEBUG) << "IndexScan result computation done.\n";
 }
 
 // _____________________________________________________________________________
 void IndexScan::computePSOboundS(ResultTable* result) const {
-  result->_data.setCols(1);
+  result->_idTable.setCols(1);
   result->_resultTypes.push_back(ResultTable::ResultType::KB);
   result->_sortedBy = {0};
   const auto& idx = _executionContext->getIndex();
-  idx.scan(_predicate, _subject, &result->_data, idx._PSO, _timeoutTimer);
+  idx.scan(_predicate, _subject, &result->_idTable, idx._PSO, _timeoutTimer);
 }
 
 // _____________________________________________________________________________
 void IndexScan::computePSOfreeS(ResultTable* result) const {
-  result->_data.setCols(2);
+  result->_idTable.setCols(2);
   result->_resultTypes.push_back(ResultTable::ResultType::KB);
   result->_resultTypes.push_back(ResultTable::ResultType::KB);
   result->_sortedBy = {0, 1};
   const auto& idx = _executionContext->getIndex();
-  idx.scan(_predicate, &result->_data, idx._PSO, _timeoutTimer);
+  idx.scan(_predicate, &result->_idTable, idx._PSO, _timeoutTimer);
 }
 
 // _____________________________________________________________________________
 void IndexScan::computePOSboundO(ResultTable* result) const {
-  result->_data.setCols(1);
+  result->_idTable.setCols(1);
   result->_resultTypes.push_back(ResultTable::ResultType::KB);
   result->_sortedBy = {0};
   const auto& idx = _executionContext->getIndex();
-  idx.scan(_predicate, _object, &result->_data, idx._POS, _timeoutTimer);
+  idx.scan(_predicate, _object, &result->_idTable, idx._POS, _timeoutTimer);
 }
 
 // _____________________________________________________________________________
 void IndexScan::computePOSfreeO(ResultTable* result) const {
-  result->_data.setCols(2);
+  result->_idTable.setCols(2);
   result->_resultTypes.push_back(ResultTable::ResultType::KB);
   result->_resultTypes.push_back(ResultTable::ResultType::KB);
   result->_sortedBy = {0, 1};
   const auto& idx = _executionContext->getIndex();
-  idx.scan(_predicate, &result->_data, idx._POS, _timeoutTimer);
+  idx.scan(_predicate, &result->_idTable, idx._POS, _timeoutTimer);
 }
 
 // _____________________________________________________________________________
@@ -310,14 +321,13 @@ size_t IndexScan::computeSizeEstimate() {
 
     // We have to do a simple scan anyway so might as well do it now
     if (getResultWidth() == 1) {
-      auto key = asString();
-      {
-        auto rlock = getExecutionContext()->getPinnedSizes().rlock();
-        if (rlock->count(key)) {
-          return rlock->at(key);
-        }
+      if (auto size = getExecutionContext()->getQueryTreeCache().getPinnedSize(
+              asString());
+          size.has_value()) {
+        return size.value();
+      } else {
+        return getResult()->size();
       }
-      return getResult()->size();
     }
     if (_type == SPO_FREE_P || _type == SOP_FREE_O) {
       return getIndex().sizeEstimate(_subject, "", "");
@@ -334,51 +344,51 @@ size_t IndexScan::computeSizeEstimate() {
 
 // _____________________________________________________________________________
 void IndexScan::computeSPOfreeP(ResultTable* result) const {
-  result->_data.setCols(2);
+  result->_idTable.setCols(2);
   result->_resultTypes.push_back(ResultTable::ResultType::KB);
   result->_resultTypes.push_back(ResultTable::ResultType::KB);
   result->_sortedBy = {0, 1};
   const auto& idx = _executionContext->getIndex();
-  idx.scan(_subject, &result->_data, idx._SPO, _timeoutTimer);
+  idx.scan(_subject, &result->_idTable, idx._SPO, _timeoutTimer);
 }
 
 // _____________________________________________________________________________
 void IndexScan::computeSOPboundO(ResultTable* result) const {
-  result->_data.setCols(1);
+  result->_idTable.setCols(1);
   result->_resultTypes.push_back(ResultTable::ResultType::KB);
   result->_sortedBy = {0};
   const auto& idx = _executionContext->getIndex();
-  idx.scan(_subject, _object, &result->_data, idx._SOP, _timeoutTimer);
+  idx.scan(_subject, _object, &result->_idTable, idx._SOP, _timeoutTimer);
 }
 
 // _____________________________________________________________________________
 void IndexScan::computeSOPfreeO(ResultTable* result) const {
-  result->_data.setCols(2);
+  result->_idTable.setCols(2);
   result->_resultTypes.push_back(ResultTable::ResultType::KB);
   result->_resultTypes.push_back(ResultTable::ResultType::KB);
   result->_sortedBy = {0, 1};
   const auto& idx = _executionContext->getIndex();
-  idx.scan(_subject, &result->_data, idx._SOP, _timeoutTimer);
+  idx.scan(_subject, &result->_idTable, idx._SOP, _timeoutTimer);
 }
 
 // _____________________________________________________________________________
 void IndexScan::computeOPSfreeP(ResultTable* result) const {
-  result->_data.setCols(2);
+  result->_idTable.setCols(2);
   result->_resultTypes.push_back(ResultTable::ResultType::KB);
   result->_resultTypes.push_back(ResultTable::ResultType::KB);
   result->_sortedBy = {0, 1};
   const auto& idx = _executionContext->getIndex();
-  idx.scan(_object, &result->_data, idx._OPS, _timeoutTimer);
+  idx.scan(_object, &result->_idTable, idx._OPS, _timeoutTimer);
 }
 
 // _____________________________________________________________________________
 void IndexScan::computeOSPfreeS(ResultTable* result) const {
-  result->_data.setCols(2);
+  result->_idTable.setCols(2);
   result->_resultTypes.push_back(ResultTable::ResultType::KB);
   result->_resultTypes.push_back(ResultTable::ResultType::KB);
   result->_sortedBy = {0, 1};
   const auto& idx = _executionContext->getIndex();
-  idx.scan(_object, &result->_data, idx._OSP, _timeoutTimer);
+  idx.scan(_object, &result->_idTable, idx._OSP, _timeoutTimer);
 }
 
 // _____________________________________________________________________________
@@ -439,4 +449,69 @@ void IndexScan::determineMultiplicities() {
     }
   }
   assert(_multiplicity.size() >= 1 || _multiplicity.size() <= 3);
+}
+
+void IndexScan::computeFullScan(ResultTable* result,
+                                const auto& Permutation) const {
+  std::vector<std::pair<Id, Id>> ignoredRanges;
+  using P = decltype(Permutation);
+
+  auto literalRange = getIndex().getVocab().prefix_range("\"");
+  auto taggedPredicatesRange = getIndex().getVocab().prefix_range("@");
+  VocabIndex languagePredicateIndex;
+  bool success =
+      getIndex().getVocab().getId(LANGUAGE_PREDICATE, &languagePredicateIndex);
+  AD_CHECK(success);
+
+  // TODO<joka921> lift `prefixRange` to Index and ID
+  if (ad_utility::isSimilar<Permutation::SPO_T, P> ||
+      ad_utility::isSimilar<Permutation::SOP_T, P>) {
+    ignoredRanges.push_back({Id::make(literalRange.first.get()),
+                             Id::make(literalRange.second.get())});
+  } else if (ad_utility::isSimilar<Permutation::PSO_T, P> ||
+             ad_utility::isSimilar<Permutation::POS_T, P>) {
+    ignoredRanges.push_back({Id::make(taggedPredicatesRange.first.get()),
+                             Id::make(taggedPredicatesRange.second.get())});
+    ignoredRanges.emplace_back(Id::make(languagePredicateIndex.get()),
+                               Id::make(languagePredicateIndex.get() + 1));
+  }
+
+  auto isTripleIgnored = [&](const auto& triple) {
+    if constexpr (ad_utility::isSimilar<Permutation::SPO_T, P> ||
+                  ad_utility::isSimilar<Permutation::OPS_T, P>) {
+      return triple[1].get() == languagePredicateIndex.get() ||
+             (triple[1].get() >= taggedPredicatesRange.first.get() &&
+              triple[1].get() < taggedPredicatesRange.second.get());
+    } else if constexpr (ad_utility::isSimilar<Permutation::SOP_T, P> ||
+                         ad_utility::isSimilar<Permutation::OSP_T, P>) {
+      return triple[2].get() == languagePredicateIndex.get() ||
+             (triple[2].get() >= taggedPredicatesRange.first.get() &&
+              triple[2].get() < taggedPredicatesRange.second.get());
+    }
+    return false;
+  };
+
+  result->_idTable.setCols(3);
+  result->_resultTypes.push_back(ResultTable::ResultType::KB);
+  result->_resultTypes.push_back(ResultTable::ResultType::KB);
+  result->_resultTypes.push_back(ResultTable::ResultType::KB);
+  result->_sortedBy = {0, 1, 2};
+
+  uint64_t resultSize = getIndex().getNofTriples();
+  if (getLimit().has_value() && getLimit() < resultSize) {
+    resultSize = getLimit().value();
+  }
+  result->_idTable.reserve(resultSize);
+  auto table = result->_idTable.moveToStatic<3>();
+  size_t i = 0;
+  for (const auto& triple :
+       TriplesView(Permutation, getExecutionContext()->getAllocator(),
+                   ignoredRanges, isTripleIgnored)) {
+    if (i >= resultSize) {
+      break;
+    }
+    table.push_back(triple);
+    ++i;
+  }
+  result->_idTable = table.moveToDynamic();
 }

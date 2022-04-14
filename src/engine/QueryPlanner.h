@@ -275,10 +275,12 @@ class QueryPlanner {
       const ParsedQuery& pq, const vector<vector<SubtreePlan>>& dpTab) const;
 
   vector<SubtreePlan> getDistinctRow(
-      const ParsedQuery& pq, const vector<vector<SubtreePlan>>& dpTab) const;
+      const ParsedQuery::SelectClause& selectClause,
+      const vector<vector<SubtreePlan>>& dpTab) const;
 
   vector<SubtreePlan> getPatternTrickRow(
-      const ParsedQuery& pq, const vector<vector<SubtreePlan>>& dpTab,
+      const ParsedQuery::SelectClause& selectClause,
+      const vector<vector<SubtreePlan>>& dpTab,
       const SparqlTriple& patternTrickTriple);
 
   vector<SubtreePlan> getHavingRow(
@@ -287,8 +289,8 @@ class QueryPlanner {
   bool connected(const SubtreePlan& a, const SubtreePlan& b,
                  const TripleGraph& graph) const;
 
-  vector<array<Id, 2>> getJoinColumns(const SubtreePlan& a,
-                                      const SubtreePlan& b) const;
+  vector<array<ColumnIndex, 2>> getJoinColumns(const SubtreePlan& a,
+                                               const SubtreePlan& b) const;
 
   string getPruningKey(const SubtreePlan& plan,
                        const vector<size_t>& orderedOnColumns) const;

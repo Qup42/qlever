@@ -9,8 +9,6 @@
 #include <iostream>
 #include <string>
 
-#include "./parser/NTriplesParser.h"
-#include "./parser/TsvParser.h"
 #include "./parser/TurtleParser.h"
 #include "./util/Log.h"
 
@@ -26,11 +24,11 @@
 template <class Parser>
 void writeNTImpl(std::ostream& out, const std::string& filename) {
   Parser p(filename);
-  std::array<std::string, 3> triple;
-  // this call by reference is necesary because of the TSV-Parsers interface
+  TurtleTriple triple;
   size_t numTriples = 0;
   while (p.getLine(triple)) {
-    out << triple[0] << " " << triple[1] << " " << triple[2] << " .\n";
+    out << triple._subject << " " << triple._predicate << " "
+        << triple._object.toRdfLiteral() << " .\n";
     numTriples++;
     if (numTriples % 10000000 == 0) {
       LOG(INFO) << "Parsed " << numTriples << " triples" << std::endl;
@@ -42,7 +40,6 @@ template <class Parser>
 void writeLabel(const std::string& filename) {
   Parser p(filename);
   std::array<std::string, 3> triple;
-  // this call by reference is necesary because of the TSV-Parsers interface
   size_t numTriples = 0;
   std::unordered_set<std::string> entities;
   while (p.getLine(triple)) {
@@ -55,7 +52,7 @@ void writeLabel(const std::string& filename) {
     }
   }
   for (const auto& t : entities) {
-    if (ad_utility::startsWith(t, "<")) {
+    if (t.starts_with('<')) {
       std::cout << t << " <qlever_label> \"" << t.substr(1, t.size() - 2)
                 << ".\n";
     }
@@ -66,19 +63,15 @@ void writeLabel(const std::string& filename) {
  * @brief Decide according to arg fileFormat which parser to use.
  * Then call writeNTImpl with the appropriate parser
  * @param out Parsed triples will be written here.
- * @param fileFormat One of [tsv|ttl|tsv|mmap]
+ * @param fileFormat One of [ttl|mmap]
  * @param filename Will read from this file, might be /dev/stdin
  */
 template <class Tokenizer_T>
 void writeNT(std::ostream& out, const string& fileFormat,
              const std::string& filename) {
-  if (fileFormat == "ttl") {
+  if (fileFormat == "ttl" || fileFormat == "nt") {
     // writeLabel<TurtleStreamParser<Tokenizer_T>>(out, filename);
     writeNTImpl<TurtleStreamParser<Tokenizer_T>>(out, filename);
-  } else if (fileFormat == "tsv") {
-    writeNTImpl<TsvParser>(out, filename);
-  } else if (fileFormat == "nt") {
-    writeNTImpl<NTriplesParser>(out, filename);
   } else if (fileFormat == "mmap") {
     writeNTImpl<TurtleMmapParser<Tokenizer_T>>(out, filename);
   } else {
@@ -95,7 +88,7 @@ void writeNTDispatch(std::ostream& out, const string& fileFormat,
   if (regexEngine == "re2") {
     writeNT<Tokenizer>(out, fileFormat, filename);
   } else if (regexEngine == "ctre") {
-    LOG(WARN) << WARNING_ASCII_ONLY_PREFIXES;
+    LOG(INFO) << WARNING_ASCII_ONLY_PREFIXES << std::endl;
     writeNT<TokenizerCtre>(out, fileFormat, filename);
   } else {
     LOG(ERROR)
@@ -116,7 +109,7 @@ void printUsage(char* execName) {
   cout << "Options" << endl;
   cout << "  " << std::setw(20) << "F, file-format" << std::setw(1) << "    "
        << " Specify format of the input file. Must be one of "
-          "[tsv|nt|ttl|mmap]."
+          "[nt|ttl|mmap]."
        << " " << std::setw(36)
        << "If not set, we will try to deduce from the filename" << endl
        << " " << std::setw(36)
@@ -182,13 +175,10 @@ int main(int argc, char** argv) {
 
   if (fileFormat.empty()) {
     bool filetypeDeduced = false;
-    if (ad_utility::endsWith(inputFile, ".tsv")) {
-      fileFormat = "tsv";
-      filetypeDeduced = true;
-    } else if (ad_utility::endsWith(inputFile, ".nt")) {
+    if (inputFile.ends_with(".nt")) {
       fileFormat = "nt";
       filetypeDeduced = true;
-    } else if (ad_utility::endsWith(inputFile, ".ttl")) {
+    } else if (inputFile.ends_with(".ttl")) {
       fileFormat = "ttl";
       filetypeDeduced = true;
     } else {

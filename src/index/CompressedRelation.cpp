@@ -31,6 +31,11 @@ template <class Permutation, typename IdTableImpl>
 void CompressedRelationMetaData::scan(
     Id col0Id, IdTableImpl* result, const Permutation& permutation,
     ad_utility::SharedConcurrentTimeoutTimer timer) {
+  if (!permutation._isLoaded) {
+    throw std::runtime_error("This query requires the permutation " +
+                             permutation._readableName +
+                             ", which was not loaded");
+  }
   if constexpr (!ad_utility::isVector<IdTableImpl>) {
     AD_CHECK(result->cols() == 2);
   }
@@ -39,8 +44,8 @@ void CompressedRelationMetaData::scan(
 
     // get all the blocks where _col0FirstId <= col0Id <= _col0LastId
     struct KeyLhs {
-      size_t _col0FirstId;
-      size_t _col0LastId;
+      Id _col0FirstId;
+      Id _col0LastId;
     };
     auto [beginBlock, endBlock] = std::equal_range(
         permutation._meta.blockData().begin(),
@@ -77,7 +82,7 @@ void CompressedRelationMetaData::scan(
     AD_CHECK(!firstBlockIsIncomplete || (beginBlock == lastBlock));
     AD_CHECK(!lastBlockIsIncomplete);
     if (firstBlockIsIncomplete) {
-      AD_CHECK(metaData._offsetInBlock != Id(-1));
+      AD_CHECK(metaData._offsetInBlock != std::numeric_limits<uint64_t>::max());
     }
 
     // We have at most one block that is incomplete and thus requires trimming.
@@ -151,7 +156,6 @@ void CompressedRelationMetaData::scan(
   }
 }
 
-using V = std::vector<std::array<Id, 2>>;
 // Explicit instantiations for all six permutations
 template void CompressedRelationMetaData::scan<Permutation::POS_T, IdTable>(
     Id key, IdTable* result, const Permutation::POS_T& p,
@@ -172,6 +176,8 @@ template void CompressedRelationMetaData::scan<Permutation::OSP_T, IdTable>(
     Id key, IdTable* result, const Permutation::OSP_T& p,
     ad_utility::SharedConcurrentTimeoutTimer timer);
 
+using V = std::vector<std::array<Id, 2>,
+                      ad_utility::AllocatorWithLimit<std::array<Id, 2>>>;
 template void CompressedRelationMetaData::scan<Permutation::POS_T, V>(
     Id key, V* result, const Permutation::POS_T& p,
     ad_utility::SharedConcurrentTimeoutTimer timer);
@@ -191,6 +197,26 @@ template void CompressedRelationMetaData::scan<Permutation::OSP_T, V>(
     Id key, V* result, const Permutation::OSP_T& p,
     ad_utility::SharedConcurrentTimeoutTimer timer);
 
+using V2 = std::vector<std::array<Id, 2>>;
+template void CompressedRelationMetaData::scan<Permutation::POS_T, V2>(
+    Id key, V2* result, const Permutation::POS_T& p,
+    ad_utility::SharedConcurrentTimeoutTimer timer);
+template void CompressedRelationMetaData::scan<Permutation::PSO_T, V2>(
+    Id key, V2* result, const Permutation::PSO_T& p,
+    ad_utility::SharedConcurrentTimeoutTimer timer);
+template void CompressedRelationMetaData::scan<Permutation::SPO_T, V2>(
+    Id key, V2* result, const Permutation::SPO_T& p,
+    ad_utility::SharedConcurrentTimeoutTimer timer);
+template void CompressedRelationMetaData::scan<Permutation::SOP_T, V2>(
+    Id key, V2* result, const Permutation::SOP_T& p,
+    ad_utility::SharedConcurrentTimeoutTimer timer);
+template void CompressedRelationMetaData::scan<Permutation::OPS_T, V2>(
+    Id key, V2* result, const Permutation::OPS_T& p,
+    ad_utility::SharedConcurrentTimeoutTimer timer);
+template void CompressedRelationMetaData::scan<Permutation::OSP_T, V2>(
+    Id key, V2* result, const Permutation::OSP_T& p,
+    ad_utility::SharedConcurrentTimeoutTimer timer);
+
 // _____________________________________________________________________________
 template <class Permutation, typename IdTableImpl>
 void CompressedRelationMetaData::scan(
@@ -204,10 +230,10 @@ void CompressedRelationMetaData::scan(
     // Get all the blocks  that possibly might contain our pair of col0Id and
     // col1Id
     struct KeyLhs {
-      size_t _col0FirstId;
-      size_t _col0LastId;
-      size_t _col1FirstId;
-      size_t _col1LastId;
+      Id _col0FirstId;
+      Id _col0LastId;
+      Id _col1FirstId;
+      Id _col1LastId;
     };
 
     auto comp = [](const auto& a, const auto& b) {
@@ -224,7 +250,8 @@ void CompressedRelationMetaData::scan(
 
     // Invariant: The col0Id is completely stored in a single block, or it is
     // contained in multiple blocks that only contain this col0Id,
-    bool col0IdHasExclusiveBlocks = metaData._offsetInBlock == Id(-1);
+    bool col0IdHasExclusiveBlocks =
+        metaData._offsetInBlock == std::numeric_limits<uint64_t>::max();
     if (!col0IdHasExclusiveBlocks) {
       AD_CHECK(endBlock - beginBlock == 1);
     }
@@ -238,7 +265,8 @@ void CompressedRelationMetaData::scan(
           readAndDecompressBlock(block, permutation);
 
       // Find the range in the block, that belongs to the same relation `col0Id`
-      bool containedInOnlyOneBlock = metaData._offsetInBlock != Id(-1);
+      bool containedInOnlyOneBlock =
+          metaData._offsetInBlock != std::numeric_limits<uint64_t>::max();
       auto begin = uncompressedBuffer.begin();
       if (containedInOnlyOneBlock) {
         begin += metaData._offsetInBlock;
@@ -246,9 +274,10 @@ void CompressedRelationMetaData::scan(
       auto end = containedInOnlyOneBlock ? begin + metaData._numRows
                                          : uncompressedBuffer.end();
 
-      // Find the range in the block, where also the col1Id matches.
+      // Find the range in the block, where also the col1Id matches (the second
+      // ID in the `std::array` does not matter).
       std::tie(begin, end) = std::equal_range(
-          begin, end, std::array<Id, 2>{col1Id, 0},
+          begin, end, std::array<Id, 2>{col1Id, Id{}},
           [](const auto& a, const auto& b) { return a[0] < b[0]; });
 
       // Extract the one column result from the two column block.
@@ -362,7 +391,7 @@ template void CompressedRelationMetaData::scan<Permutation::OSP_T, IdTable>(
 
 // ___________________________________________________________________________
 void CompressedRelationWriter::addRelation(
-    Id col0Id, const ad_utility::BufferedVector<array<Id, 2>>& data,
+    Id col0Id, const ad_utility::BufferedVector<std::array<Id, 2>>& data,
     size_t numDistinctCol1, bool functional) {
   LOG(TRACE) << "Writing a relation ...\n";
   AD_CHECK_GT(data.size(), 0);
@@ -389,7 +418,7 @@ void CompressedRelationWriter::addRelation(
     // The relation is large, immediately write the relation to a set of
     // exclusive blocks.
     writeRelationToExclusiveBlocks(col0Id, data);
-    metaData._offsetInBlock = Id(-1);
+    metaData._offsetInBlock = std::numeric_limits<uint64_t>::max();
   } else {
     // Append to the current buffered block.
     metaData._offsetInBlock = _buffer.data().size() / (2 * sizeof(Id));
@@ -408,7 +437,7 @@ void CompressedRelationWriter::addRelation(
 
 // _____________________________________________________________________________
 void CompressedRelationWriter::writeRelationToExclusiveBlocks(
-    Id col0Id, const ad_utility::BufferedVector<array<Id, 2>>& data) {
+    Id col0Id, const ad_utility::BufferedVector<std::array<Id, 2>>& data) {
   constexpr size_t NUM_ROWS_PER_BLOCK =
       BLOCKSIZE_COMPRESSED_METADATA / (2 * sizeof(Id));
   for (size_t i = 0; i < data.size(); i += NUM_ROWS_PER_BLOCK) {
@@ -442,8 +471,8 @@ void CompressedRelationWriter::writeBufferedRelationsToSingleBlock() {
   _currentBlockData._offsetInFile = _outfile.tell();
   _currentBlockData._compressedSize = compressedBlock.size();
   _currentBlockData._numRows = numRows;
-  // firstId and lastId of _currentBlockData were already set correctly by the
-  // addRelation() function
+  // The `firstId` and `lastId` of `_currentBlockData` were already set
+  // correctly by `addRelation()`.
   _blockBuffer.push_back(_currentBlockData);
   _outfile.write(compressedBlock.data(), compressedBlock.size());
   LOG(TRACE) << "Done writing relation.\n";

@@ -14,7 +14,7 @@
 TransitivePath::TransitivePath(
     QueryExecutionContext* qec, std::shared_ptr<QueryExecutionTree> child,
     bool leftIsVar, bool rightIsVar, size_t leftSubCol, size_t rightSubCol,
-    size_t leftValue, size_t rightValue, const std::string& leftColName,
+    Id leftValue, Id rightValue, const std::string& leftColName,
     const std::string& rightColName, size_t minDist, size_t maxDist)
     : Operation(qec),
       _leftSideTree(nullptr),
@@ -38,7 +38,7 @@ TransitivePath::TransitivePath(
 }
 
 // _____________________________________________________________________________
-std::string TransitivePath::asString(size_t indent) const {
+std::string TransitivePath::asStringImpl(size_t indent) const {
   std::ostringstream os;
   for (size_t i = 0; i < indent; ++i) {
     os << " ";
@@ -63,7 +63,7 @@ std::string TransitivePath::asString(size_t indent) const {
     os << "Right subtree:\n";
     os << _rightSideTree->asString(indent) << "\n";
   }
-  return os.str();
+  return std::move(os).str();
 }
 
 // _____________________________________________________________________________
@@ -80,7 +80,7 @@ std::string TransitivePath::getDescriptor() const {
   } else {
     os << getIndex()
               .idToOptionalString(_leftValue)
-              .value_or("#" + std::to_string(_leftValue));
+              .value_or("#" + std::to_string(_leftValue.get()));
   }
   // The predicate.
   auto scanOperation =
@@ -97,9 +97,9 @@ std::string TransitivePath::getDescriptor() const {
   } else {
     os << getIndex()
               .idToOptionalString(_rightValue)
-              .value_or("#" + std::to_string(_rightValue));
+              .value_or("#" + std::to_string(_rightValue.get()));
   }
-  return os.str();
+  return std::move(os).str();
 }
 
 // _____________________________________________________________________________
@@ -282,8 +282,8 @@ void TransitivePath::computeTransitivePath(IdTable* dynRes,
     }
     for (size_t i = 0; i < sub.size(); i++) {
       checkTimeoutHashSet();
-      size_t l = sub(i, leftSubCol);
-      size_t r = sub(i, rightSubCol);
+      Id l = sub(i, leftSubCol);
+      Id r = sub(i, rightSubCol);
       MapIt it = edges.find(l);
       if (it == edges.end()) {
         if constexpr (leftIsVar) {
@@ -304,8 +304,8 @@ void TransitivePath::computeTransitivePath(IdTable* dynRes,
     for (size_t i = 0; i < sub.size(); i++) {
       checkTimeoutHashSet();
       // Use the inverted edges
-      size_t l = sub(i, leftSubCol);
-      size_t r = sub(i, rightSubCol);
+      Id l = sub(i, leftSubCol);
+      Id r = sub(i, rightSubCol);
       MapIt it = edges.find(r);
       if (it == edges.end()) {
         std::shared_ptr<ad_utility::HashSet<Id>> s =
@@ -359,7 +359,7 @@ void TransitivePath::computeTransitivePath(IdTable* dynRes,
         continue;
       }
 
-      size_t child = *pos;
+      Id child = *pos;
       ++pos;
       size_t childDepth = positions.size();
       if (childDepth <= maxDist && marks.count(child) == 0) {
@@ -412,8 +412,8 @@ void TransitivePath::computeTransitivePathLeftBound(
   // initialize the map from the subresult
   for (size_t i = 0; i < sub.size(); i++) {
     checkTimeoutHashSet();
-    size_t l = sub(i, leftSubCol);
-    size_t r = sub(i, rightSubCol);
+    Id l = sub(i, leftSubCol);
+    Id r = sub(i, rightSubCol);
     MapIt it = edges.find(l);
     if (it == edges.end()) {
       std::shared_ptr<ad_utility::HashSet<Id>> s =
@@ -438,7 +438,7 @@ void TransitivePath::computeTransitivePathLeftBound(
   // be modified after this point.
   std::vector<std::shared_ptr<const ad_utility::HashSet<Id>>> edgeCache;
 
-  size_t last_elem = std::numeric_limits<size_t>::max();
+  Id last_elem = ID_NO_VALUE;
   size_t last_result_begin = 0;
   size_t last_result_end = 0;
   for (size_t i = 0; i < left.size(); i++) {
@@ -484,7 +484,7 @@ void TransitivePath::computeTransitivePathLeftBound(
         continue;
       }
 
-      size_t child = *pos;
+      Id child = *pos;
       ++pos;
       size_t childDepth = positions.size();
       if (childDepth <= maxDist && marks.count(child) == 0) {
@@ -550,8 +550,8 @@ void TransitivePath::computeTransitivePathRightBound(
   // initialize the map from the subresult
   for (size_t i = 0; i < sub.size(); i++) {
     checkTimeoutHashSet();
-    size_t l = sub(i, leftSubCol);
-    size_t r = sub(i, rightSubCol);
+    Id l = sub(i, leftSubCol);
+    Id r = sub(i, rightSubCol);
     MapIt it = edges.find(r);
     if (it == edges.end()) {
       std::shared_ptr<ad_utility::HashSet<Id>> s =
@@ -576,7 +576,7 @@ void TransitivePath::computeTransitivePathRightBound(
   // be modified after this point.
   std::vector<std::shared_ptr<const ad_utility::HashSet<Id>>> edgeCache;
 
-  size_t last_elem = std::numeric_limits<size_t>::max();
+  Id last_elem = ID_NO_VALUE;
   size_t last_result_begin = 0;
   size_t last_result_end = 0;
   for (size_t i = 0; i < right.size(); i++) {
@@ -622,7 +622,7 @@ void TransitivePath::computeTransitivePathRightBound(
         continue;
       }
 
-      size_t child = *pos;
+      Id child = *pos;
       ++pos;
       size_t childDepth = positions.size();
       if (childDepth <= maxDist && marks.count(child) == 0) {
@@ -683,40 +683,40 @@ void TransitivePath::computeResult(ResultTable* result) {
   } else {
     result->_resultTypes.push_back(ResultTable::ResultType::KB);
   }
-  result->_data.setCols(getResultWidth());
+  result->_idTable.setCols(getResultWidth());
 
-  int subWidth = subRes->_data.cols();
+  int subWidth = subRes->_idTable.cols();
   if (_leftSideTree != nullptr) {
     shared_ptr<const ResultTable> leftRes = _leftSideTree->getResult();
-    for (size_t c = 0; c < leftRes->_data.cols(); c++) {
+    for (size_t c = 0; c < leftRes->_idTable.cols(); c++) {
       if (c != _leftSideCol) {
         result->_resultTypes.push_back(leftRes->getResultType(c));
       }
     }
     runtimeInfo.addChild(_leftSideTree->getRootOperation()->getRuntimeInfo());
-    int leftWidth = leftRes->_data.cols();
+    int leftWidth = leftRes->_idTable.cols();
     CALL_FIXED_SIZE_3(subWidth, leftWidth, _resultWidth,
-                      computeTransitivePathLeftBound, &result->_data,
-                      subRes->_data, leftRes->_data, _leftSideCol, _rightIsVar,
-                      _leftSubCol, _rightSubCol, _rightValue, _minDist,
-                      _maxDist, _resultWidth);
+                      computeTransitivePathLeftBound, &result->_idTable,
+                      subRes->_idTable, leftRes->_idTable, _leftSideCol,
+                      _rightIsVar, _leftSubCol, _rightSubCol, _rightValue,
+                      _minDist, _maxDist, _resultWidth);
   } else if (_rightSideTree != nullptr) {
     shared_ptr<const ResultTable> rightRes = _rightSideTree->getResult();
-    for (size_t c = 0; c < rightRes->_data.cols(); c++) {
+    for (size_t c = 0; c < rightRes->_idTable.cols(); c++) {
       if (c != _rightSideCol) {
         result->_resultTypes.push_back(rightRes->getResultType(c));
       }
     }
     runtimeInfo.addChild(_rightSideTree->getRootOperation()->getRuntimeInfo());
-    int rightWidth = rightRes->_data.cols();
+    int rightWidth = rightRes->_idTable.cols();
     CALL_FIXED_SIZE_3(subWidth, rightWidth, _resultWidth,
-                      computeTransitivePathRightBound, &result->_data,
-                      subRes->_data, rightRes->_data, _rightSideCol, _leftIsVar,
-                      _leftSubCol, _rightSubCol, _leftValue, _minDist, _maxDist,
-                      _resultWidth);
+                      computeTransitivePathRightBound, &result->_idTable,
+                      subRes->_idTable, rightRes->_idTable, _rightSideCol,
+                      _leftIsVar, _leftSubCol, _rightSubCol, _leftValue,
+                      _minDist, _maxDist, _resultWidth);
   } else {
-    CALL_FIXED_SIZE_1(subWidth, computeTransitivePath, &result->_data,
-                      subRes->_data, _leftIsVar, _rightIsVar, _leftSubCol,
+    CALL_FIXED_SIZE_1(subWidth, computeTransitivePath, &result->_idTable,
+                      subRes->_idTable, _leftIsVar, _rightIsVar, _leftSubCol,
                       _rightSubCol, _leftValue, _rightValue, _minDist,
                       _maxDist);
   }

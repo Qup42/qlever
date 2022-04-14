@@ -44,20 +44,37 @@ class LocaleManager {
    * Wraps a string that contains unicode collation weights for another string
    * Only needed for making interfaces explicit and less errorProne
    */
+  // TODO<GCC12> As soon as we have constexpr std::string, this class can
+  //  become constexpr.
   class SortKey {
    public:
     SortKey() = default;
-    explicit SortKey(std::string_view contents) : _content(contents) {}
-    [[nodiscard]] const std::string& get() const { return _content; }
-    std::string& get() { return _content; }
+    explicit SortKey(std::string_view sortKey) : _sortKey(sortKey) {}
+    [[nodiscard]] constexpr const std::string& get() const noexcept {
+      return _sortKey;
+    }
+    constexpr std::string& get() noexcept { return _sortKey; }
 
-    // compare according to the byte value
-    [[nodiscard]] int compare(const SortKey& rhs) const {
-      return _content.compare(rhs._content);
+    // Comparison of sort key is done lexicographically on the byte values
+    // of member `_sortKey`
+    [[nodiscard]] int compare(const SortKey& rhs) const noexcept {
+      return _sortKey.compare(rhs._sortKey);
     }
 
+    auto operator<=>(const SortKey&) const = default;
+    bool operator==(const SortKey&) const = default;
+
+    /// Is this sort key a prefix of another sort key. Note: This does not imply
+    /// any guarantees on the relation of the underlying strings.
+    bool starts_with(const SortKey& rhs) const noexcept {
+      return get().starts_with(rhs.get());
+    }
+
+    /// Return the number of bytes in the `SortKey`
+    std::string::size_type size() const noexcept { return get().size(); }
+
    private:
-    std::string _content;
+    std::string _sortKey;
   };
 
   /// Copy constructor
@@ -172,6 +189,49 @@ class LocaleManager {
       res += s;
     }
     return finalRes;
+  }
+
+  /// Get a `SortKey` for `Level::PRIMARY` that corresponds to a prefix of `s`.
+  /// \param s The input of which we want to obtain a sort key.
+  /// \param prefixLength Obtain a SortKey for `prefixLength` many relevant
+  /// characters
+  ///               (see below).
+  /// \return A `SortKey` that is a prefix of the `SortKey` for `s` w.r.t
+  ///         `Level::PRIMARY` and that also is a `SortKey` for a prefix "p"
+  ///         of `s`. "p" is the minimal prefix of `s` which consists of
+  ///         at least `prefixLength` codepoints and whose SortKey fulfills the
+  ///         first condition. Codepoints, which do not contribute to the
+  ///         `SortKey` because they are irrelevant for the `PRIMARY` level do
+  ///         not count towards `prefixLength`. The first element of the return
+  ///         value is the actual number of (contributing) codepoints in "p". If
+  ///         `s` contains less than `prefixLength` contributing codepoints,
+  ///         then {totalNumberOfContributingCodepoints, completeSortKey} is
+  ///         returned.
+  [[nodiscard]] std::pair<size_t, SortKey> getPrefixSortKey(
+      std::string_view s, size_t prefixLength) const {
+    size_t numContributingCodepoints = 0;
+    SortKey sortKey;
+    size_t prefixLengthSoFar = 1;
+    SortKey completeSortKey = getSortKey(s, Level::PRIMARY);
+    while (numContributingCodepoints < prefixLength ||
+           !completeSortKey.starts_with(sortKey)) {
+      auto [numCodepoints, prefix] =
+          ad_utility::getUTF8Prefix(s, prefixLengthSoFar);
+      auto nextLongerSortKey = getSortKey(prefix, Level::PRIMARY);
+      if (nextLongerSortKey != sortKey) {
+        // The `SortKey` changed by adding a codepoint, so that codepoint
+        // was contributing.
+        numContributingCodepoints++;
+        sortKey = std::move(nextLongerSortKey);
+      }
+      if (numCodepoints < prefixLengthSoFar) {
+        // We have checked the complete string without finding a sufficiently
+        // long contributing prefix.
+        break;
+      }
+      prefixLengthSoFar++;
+    }
+    return {numContributingCodepoints, std::move(sortKey)};
   }
 
   /**
@@ -336,7 +396,7 @@ class SimpleStringComparator {
     if (cmpRes != 0 || level != Level::TOTAL) {
       return cmpRes;
     }
-    return a.compare(b) < 0;
+    return a.compare(b);
   }
 
   /**
@@ -397,13 +457,12 @@ class SimpleStringComparator {
  private:
   LocaleManager _locManager;
 };
-
 /**
  * @brief Handles the comparisons between RDFS triple elements according to
  * their data types and proper Unicode collation.
  *
- *  General Approach: First Sort by the datatype, then by the actual value and
- * then by the language tag.
+ *  General Approach: First Sort by the datatype, then by the actual value
+ * and then by the language tag.
  */
 class TripleComponentComparator {
  public:
@@ -437,17 +496,20 @@ class TripleComponentComparator {
   template <class InnerString, class LanguageTag>
   struct SplitValBase {
     SplitValBase() = default;
-    SplitValBase(char fst, InnerString trans, LanguageTag l)
+    SplitValBase(char fst, InnerString trans, LanguageTag l, bool externalized)
         : firstOriginalChar(fst),
           transformedVal(std::move(trans)),
-          langtag(std::move(l)) {}
+          langtag(std::move(l)),
+          isExternalized{externalized} {}
 
     /// The first char of the original value, used to distinguish between
     /// different datatypes
     char firstOriginalChar = '\0';
     InnerString transformedVal;  /// The original inner value, possibly
                                  /// transformed by a locale().
-    LanguageTag langtag;         /// the language tag, possibly empty
+    LanguageTag langtag;         /// The language tag, possibly empty.
+    bool isExternalized;         /// Does this word belong to the externalized
+                                 /// vocabulary.
   };
 
   /**
@@ -484,7 +546,7 @@ class TripleComponentComparator {
    */
   bool operator()(std::string_view a, const SplitVal& spB,
                   const Level level) const {
-    auto spA = extractAndTransformComparable(a, level);
+    auto spA = extractAndTransformComparable(a, level, false);
     return compare(spA, spB, level) < 0;
   }
 
@@ -497,8 +559,8 @@ class TripleComponentComparator {
   /// std::strcmp
   [[nodiscard]] int compare(std::string_view a, std::string_view b,
                             const Level level = Level::QUARTERNARY) const {
-    auto splitA = extractComparable<SplitValNonOwning>(a, level);
-    auto splitB = extractComparable<SplitValNonOwning>(b, level);
+    auto splitA = extractComparable<SplitValNonOwning>(a, level, false);
+    auto splitB = extractComparable<SplitValNonOwning>(b, level, false);
     // We have to have a total ordering of unique elements in the vocabulary,
     // so if they compare equal according to the locale, use strcmp
     auto cmp = compare(splitA, splitB, level);
@@ -510,8 +572,8 @@ class TripleComponentComparator {
    * value according to the held locale
    */
   [[nodiscard]] SplitVal extractAndTransformComparable(
-      std::string_view a, const Level level) const {
-    return extractComparable<SplitVal>(a, level);
+      std::string_view a, const Level level, bool isExternal = false) const {
+    return extractComparable<SplitVal>(a, level, isExternal);
   }
 
   /**
@@ -525,6 +587,13 @@ class TripleComponentComparator {
   [[nodiscard]] int compare(const SplitValBase<A, B>& a,
                             const SplitValBase<A, B>& b,
                             const Level level) const {
+    // Currently all internal words stand before all external words.
+    // TODO<joka921> This has to be changed once we have the IDs interleaved
+    // via the MilestoneIdManager.
+    if (a.isExternalized != b.isExternalized) {
+      return a.isExternalized ? 1 : -1;
+    }
+
     if (auto res = std::strncmp(&a.firstOriginalChar, &b.firstOriginalChar, 1);
         res != 0) {
       return res;  // different data types, decide on the datatype
@@ -568,7 +637,7 @@ class TripleComponentComparator {
   [[nodiscard]] SplitVal transformToFirstPossibleBiggerValue(
       std::string_view s, const Level level) const {
     AD_CHECK(level == Level::PRIMARY)
-    auto transformed = extractAndTransformComparable(s, Level::PRIMARY);
+    auto transformed = extractAndTransformComparable(s, Level::PRIMARY, false);
     // The `firstOriginalChar` is either " or < or @
     AD_CHECK(static_cast<unsigned char>(transformed.firstOriginalChar) <
              std::numeric_limits<unsigned char>::max())
@@ -612,13 +681,12 @@ class TripleComponentComparator {
    */
   template <class SplitValType>
   [[nodiscard]] SplitValType extractComparable(
-      std::string_view a, [[maybe_unused]] const Level level) const {
+      std::string_view a, [[maybe_unused]] const Level level,
+      bool isExternal) const {
     std::string_view res = a;
     const char first = a.empty() ? char(0) : a[0];
     std::string_view langtag;
-    if (ad_utility::startsWith(res, "\"") ||
-        ad_utility::startsWith(res,
-                               std::string{EXTERNALIZED_LITERALS_PREFIX})) {
+    if (res.starts_with('"')) {
       // only remove the first character in case of literals that always start
       // with a quotation mark. For all other types we need this. <TODO> rework
       // the vocabulary's data type to remove ALL of those hacks
@@ -636,11 +704,12 @@ class TripleComponentComparator {
       }
     }
     if constexpr (std::is_same_v<SplitValType, SplitVal>) {
-      return {first, _locManager.getSortKey(res, level), std::string(langtag)};
+      return {first, _locManager.getSortKey(res, level), std::string(langtag),
+              isExternal};
     } else if constexpr (std::is_same_v<SplitValType, SplitValNonOwning>) {
-      return {first, res, langtag};
+      return {first, res, langtag, isExternal};
     } else {
-      SplitValType().ThisShouldNotCompile();
+      static_assert(ad_utility::alwaysFalse<SplitValType>);
     }
   }
 };

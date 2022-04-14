@@ -10,10 +10,13 @@
 #include <vector>
 
 #include "../engine/ResultType.h"
+#include "../engine/sparqlExpressions/SparqlExpressionPimpl.h"
 #include "../util/Exception.h"
 #include "../util/HashMap.h"
 #include "../util/StringUtils.h"
 #include "ParseException.h"
+#include "data/Types.h"
+#include "data/VarOrTerm.h"
 
 using std::string;
 using std::vector;
@@ -21,13 +24,13 @@ using std::vector;
 // Data container for prefixes
 class SparqlPrefix {
  public:
-  SparqlPrefix(const string& prefix, const string& uri)
-      : _prefix(prefix), _uri(uri) {}
+  SparqlPrefix(string prefix, string uri)
+      : _prefix(std::move(prefix)), _uri(std::move(uri)) {}
 
   string _prefix;
   string _uri;
 
-  string asString() const;
+  [[nodiscard]] string asString() const;
 };
 
 class PropertyPath {
@@ -50,7 +53,7 @@ class PropertyPath {
         _can_be_null(false) {}
   explicit PropertyPath(Operation op)
       : _operation(op), _limit(0), _iri(), _children(), _can_be_null(false) {}
-  PropertyPath(Operation op, uint16_t limit, const std::string& iri,
+  PropertyPath(Operation op, uint16_t limit, std::string iri,
                std::initializer_list<PropertyPath> children);
 
   bool operator==(const PropertyPath& other) const {
@@ -60,7 +63,7 @@ class PropertyPath {
   }
 
   void writeToStream(std::ostream& out) const;
-  std::string asString() const;
+  [[nodiscard]] std::string asString() const;
 
   void computeCanBeNull();
 
@@ -80,9 +83,7 @@ class PropertyPath {
   bool _can_be_null;
 };
 
-inline bool isVariable(const string& elem) {
-  return ad_utility::startsWith(elem, "?");
-}
+inline bool isVariable(const string& elem) { return elem.starts_with("?"); }
 
 inline bool isVariable(const PropertyPath& elem) {
   return elem._operation == PropertyPath::Operation::IRI &&
@@ -94,11 +95,13 @@ std::ostream& operator<<(std::ostream& out, const PropertyPath& p);
 // Data container for parsed triples from the where clause
 class SparqlTriple {
  public:
-  SparqlTriple(const string& s, const PropertyPath& p, const string& o)
-      : _s(s), _p(p), _o(o) {}
+  SparqlTriple(string s, PropertyPath p, string o)
+      : _s(std::move(s)), _p(std::move(p)), _o(std::move(o)) {}
 
-  SparqlTriple(const string& s, const std::string& p_iri, const string& o)
-      : _s(s), _p(PropertyPath::Operation::IRI, 0, p_iri, {}), _o(o) {}
+  SparqlTriple(string s, const std::string& p_iri, string o)
+      : _s(std::move(s)),
+        _p(PropertyPath::Operation::IRI, 0, p_iri, {}),
+        _o(std::move(o)) {}
 
   bool operator==(const SparqlTriple& other) const {
     return _s == other._s && _p == other._p && _o == other._o;
@@ -107,16 +110,16 @@ class SparqlTriple {
   PropertyPath _p;
   string _o;
 
-  string asString() const;
+  [[nodiscard]] string asString() const;
 };
 
 class OrderKey {
  public:
-  OrderKey(const string& key, bool desc) : _key(key), _desc(desc) {}
+  OrderKey(string key, bool desc) : _key(std::move(key)), _desc(desc) {}
   explicit OrderKey(const string& textual) {
     std::string lower = ad_utility::getLowercaseUtf8(textual);
     size_t pos = 0;
-    _desc = ad_utility::startsWith(lower, "desc(");
+    _desc = lower.starts_with("desc(");
     // skip the 'desc('
     if (_desc) {
       pos += 5;
@@ -127,7 +130,7 @@ class OrderKey {
       }
     }
     // skip 'asc('
-    if (ad_utility::startsWith(lower, "asc(")) {
+    if (lower.starts_with("asc(")) {
       pos += 4;
       // skip any whitespace after the opening bracket
       while (pos < textual.size() &&
@@ -154,7 +157,7 @@ class OrderKey {
       _key = textual.substr(pos, end - pos);
     } else if (lower[pos] == 's') {
       // key is a text score
-      if (!ad_utility::startsWith(lower.substr(pos), "score(")) {
+      if (!lower.substr(pos).starts_with("score(")) {
         throw ParseException("Expected keyword score in order by key: " +
                              textual);
       }
@@ -195,7 +198,7 @@ class SparqlFilter {
     PREFIX = 9
   };
 
-  string asString() const;
+  [[nodiscard]] string asString() const;
 
   FilterType _type;
   string _lhs;
@@ -297,22 +300,73 @@ class ParsedQuery {
   }
 
   struct Alias {
-    AggregateType _type;
-    string _inVarName;
+    sparqlExpression::SparqlExpressionPimpl _expression;
     string _outVarName;
-    bool _isAggregate = true;
-    bool _isDistinct = false;
-    std::string _function;
-    // The deilimiter used by group concat
-    std::string _delimiter = " ";
+    [[nodiscard]] std::string getDescriptor() const {
+      return "(" + _expression.getDescriptor() + " as " + _outVarName + ")";
+    }
   };
 
+  // Represents either "all Variables" (Select *) or a list of explicitly
+  // selected Variables (Select ?a ?b).
+  struct SelectedVarsOrAsterisk {
+   private:
+    std::variant<vector<string>, char> _varsOrAsterisk;
+    std::vector<string> _variablesFromQueryBody;
+
+   public:
+    [[nodiscard]] bool isAllVariablesSelected() const {
+      return std::holds_alternative<char>(_varsOrAsterisk);
+    }
+
+    [[nodiscard]] bool isManuallySelectedVariables() const {
+      return std::holds_alternative<std::vector<string>>(_varsOrAsterisk);
+    }
+
+    // Sets the Selector to 'All' (*) only if the Selector is still undefined
+    void setAllVariablesSelected() { _varsOrAsterisk = '*'; }
+
+    // Sets the Selector with the variables manually defined
+    // Ex: Select var_1 (...) var_n
+    void setManuallySelected(std::vector<string> variables) {
+      _varsOrAsterisk = std::move(variables);
+    }
+
+    // Add a variable, that was found in the query body. The added variables
+    // will only be used if `isAsterisk` is true.
+    void registerVariableVisibleInQueryBody(const string& variable) {
+      if (!(std::find(_variablesFromQueryBody.begin(),
+                      _variablesFromQueryBody.end(),
+                      variable) != _variablesFromQueryBody.end())) {
+        _variablesFromQueryBody.emplace_back(variable);
+      }
+    }
+
+    // Get the variables accordingly to established Selector:
+    // Select All (Select '*')
+    // or
+    // explicit variables selection (Select 'var_1' ... 'var_n')
+    [[nodiscard]] const auto& getSelectedVariables() const {
+      return isAllVariablesSelected()
+                 ? _variablesFromQueryBody
+                 : std::get<std::vector<string>>(_varsOrAsterisk);
+      ;
+    }
+  };
+
+  // Represents the Select Clause with all the possible outcomes
   struct SelectClause {
-    vector<string> _selectedVariables;
+    // `_aliases` will be empty if Selector '*' is present.
+    // This means, that there is a `SELECT *` clause in the query.
     std::vector<Alias> _aliases;
+    SelectedVarsOrAsterisk _varsOrAsterisk;
     bool _reduced = false;
     bool _distinct = false;
   };
+
+  SelectClause _selectedVarsOrAsterisk{SelectClause{}};
+
+  using ConstructClause = ad_utility::sparql_types::Triples;
 
   ParsedQuery() = default;
 
@@ -322,17 +376,54 @@ class ParsedQuery {
   size_t _numGraphPatterns = 1;
   vector<OrderKey> _orderBy;
   vector<string> _groupByVariables;
-  string _limit;
+  std::optional<size_t> _limit = std::nullopt;
   string _textLimit;
-  string _offset;
+  std::optional<size_t> _offset = std::nullopt;
   string _originalString;
-  SelectClause _selectClause;
+
+  // explicit default initialisation because the constructor
+  // of SelectClause is private
+  std::variant<SelectClause, ConstructClause> _clause{_selectedVarsOrAsterisk};
+
+  [[nodiscard]] bool hasSelectClause() const {
+    return std::holds_alternative<SelectClause>(_clause);
+  }
+
+  [[nodiscard]] bool hasConstructClause() const {
+    return std::holds_alternative<ConstructClause>(_clause);
+  }
+
+  [[nodiscard]] decltype(auto) selectClause() const {
+    return std::get<SelectClause>(_clause);
+  }
+
+  [[nodiscard]] decltype(auto) constructClause() const {
+    return std::get<ConstructClause>(_clause);
+  }
+
+  [[nodiscard]] decltype(auto) selectClause() {
+    return std::get<SelectClause>(_clause);
+  }
+
+  [[nodiscard]] decltype(auto) constructClause() {
+    return std::get<ConstructClause>(_clause);
+  }
+
+  // Add a variable, that was found in the SubQuery body, when query has a
+  // Select Clause
+  [[maybe_unused]] bool registerVariableVisibleInQueryBody(
+      const string& variable) {
+    if (!hasSelectClause()) return false;
+    selectClause()._varsOrAsterisk.registerVariableVisibleInQueryBody(variable);
+    return true;
+  }
 
   void expandPrefixes();
-  void parseAliases();
 
   auto& children() { return _rootGraphPattern._children; }
-  const auto& children() const { return _rootGraphPattern._children; }
+  [[nodiscard]] const auto& children() const {
+    return _rootGraphPattern._children;
+  }
 
   /**
    * @brief Adds all elements from p's rootGraphPattern to this parsed query's
@@ -340,20 +431,13 @@ class ParsedQuery {
    */
   void merge(const ParsedQuery& p);
 
-  string asString() const;
+  [[nodiscard]] string asString() const;
 
  private:
   static void expandPrefix(
       PropertyPath& item, const ad_utility::HashMap<string, string>& prefixMap);
   static void expandPrefix(
       string& item, const ad_utility::HashMap<string, string>& prefixMap);
-
-  /**
-   * @brief Parses the given alias and adds it to the list of _aliases.
-   * @param alias The inner part of the alias (without the surrounding brackets)
-   * @return The new name of the variable after the aliasing was completed
-   */
-  std::string parseAlias(const std::string& alias);
 };
 
 struct GraphPatternOperation {
@@ -397,56 +481,13 @@ struct GraphPatternOperation {
   // a knowledge base constant. For simplicity, we store both values instead of
   // using a union or std::variant here.
   struct Bind {
-    // Only usigned integer and knowledge base constants are currently supported
-    struct Constant {
-      int64_t _intValue = 0;  // the Value of an integer constant (VERBATIM)
-      string _kbValue;  // the value of a knowledge base entity or literal (KB)
-      qlever::ResultType _type;  // the type, currently always KB or VERBATIM
-
-      Constant() = default;
-
-      // Initialize a  VERBATIM constant. Also set a readable _kbValue variable,
-      // since it is used with the runtime info
-      explicit Constant(int64_t val)
-          : _intValue(val),
-            _kbValue(std::to_string(val)),
-            _type(qlever::ResultType::VERBATIM) {}
-      // Initialize a KB constant. If the argument string is not part of the KB
-      // this will lead to an error later on (currently no possibility to
-      // already check this during parsing
-      explicit Constant(std::string entry)
-          : _kbValue(std::move(entry)), _type(qlever::ResultType::KB) {}
-      // TODO<joka921> in c++ 20 we have constexpr strings.
-      static constexpr const char* Name = "Constant";
-      // Some other functions need this interface, for example,
-      // ParsedQuery::expandPrefix .
-      vector<string*> strings() { return {&_kbValue}; }
-      [[nodiscard]] string getDescriptor() const { return _kbValue; }
-    };
-    struct BinaryOperation {
-      static constexpr const char* Name = "Binary operation";
-      string _var1, _var2;
-      string _binaryOperator;
-      vector<string*> strings() { return {&_var1, &_var2, &_binaryOperator}; }
-      [[nodiscard]] string getDescriptor() const {
-        return _var1 + " " + _binaryOperator + " " + _var2;
-      }
-    };
-
-    struct Rename {
-      static constexpr const char* Name = "Rename";
-      string _var;
-      vector<string*> strings() { return {&_var}; }
-      [[nodiscard]] string getDescriptor() const { return _var; }
-    };
-    std::variant<Rename, Constant, BinaryOperation> _expressionVariant;
+    sparqlExpression::SparqlExpressionPimpl _expression;
     std::string _target;  // the variable to which the expression will be bound
 
     // Return all the strings contained in the BIND expression (variables,
     // constants, etc. Is required e.g. by ParsedQuery::expandPrefix.
     vector<string*> strings() {
-      auto r = std::visit([](auto&& arg) { return arg.strings(); },
-                          _expressionVariant);
+      auto r = _expression.strings();
       r.push_back(&_target);
       return r;
     }
@@ -458,15 +499,8 @@ struct GraphPatternOperation {
       return {r.begin(), r.end()};
     }
 
-    // "Constant", "Rename" etc
-    [[nodiscard]] constexpr const char* operationName() const {
-      return std::visit([](auto&& arg) { return arg.Name; },
-                        _expressionVariant);
-    }
-
     [[nodiscard]] string getDescriptor() const {
-      auto inner = std::visit([](auto&& arg) { return arg.getDescriptor(); },
-                              _expressionVariant);
+      auto inner = _expression.getDescriptor();
       return "BIND (" + inner + " AS " + _target + ")";
     }
   };

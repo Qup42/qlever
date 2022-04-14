@@ -30,14 +30,14 @@ Minus::Minus(QueryExecutionContext* qec,
 }
 
 // _____________________________________________________________________________
-string Minus::asString(size_t indent) const {
+string Minus::asStringImpl(size_t indent) const {
   std::ostringstream os;
   for (size_t i = 0; i < indent; ++i) {
     os << " ";
   }
   os << "MINUS\n" << _left->asString(indent) << "\n";
   os << _right->asString(indent) << " ";
-  return os.str();
+  return std::move(os).str();
 }
 
 // _____________________________________________________________________________
@@ -50,7 +50,7 @@ void Minus::computeResult(ResultTable* result) {
 
   RuntimeInformation& runtimeInfo = getRuntimeInfo();
   result->_sortedBy = resultSortedOn();
-  result->_data.setCols(getResultWidth());
+  result->_idTable.setCols(getResultWidth());
 
   const auto leftResult = _left->getResult();
   const auto rightResult = _right->getResult();
@@ -67,10 +67,10 @@ void Minus::computeResult(ResultTable* result) {
   LOG(DEBUG) << "Computing minus of results of size " << leftResult->size()
              << " and " << rightResult->size() << endl;
 
-  int leftWidth = leftResult->_data.cols();
-  int rightWidth = rightResult->_data.cols();
-  CALL_FIXED_SIZE_2(leftWidth, rightWidth, computeMinus, leftResult->_data,
-                    rightResult->_data, _matchedColumns, &result->_data);
+  int leftWidth = leftResult->_idTable.cols();
+  int rightWidth = rightResult->_idTable.cols();
+  CALL_FIXED_SIZE_2(leftWidth, rightWidth, computeMinus, leftResult->_idTable,
+                    rightResult->_idTable, _matchedColumns, &result->_idTable);
   LOG(DEBUG) << "Minus result computation done." << endl;
 }
 
@@ -108,7 +108,7 @@ size_t Minus::getCostEstimate() {
 // _____________________________________________________________________________
 template <int A_WIDTH, int B_WIDTH>
 void Minus::computeMinus(const IdTable& dynA, const IdTable& dynB,
-                         const vector<array<Id, 2>>& joinColumns,
+                         const vector<array<ColumnIndex, 2>>& joinColumns,
                          IdTable* dynResult) const {
   // Substract dynB from dynA. The result should be all result mappings mu
   // for which all result mappings mu' in dynB are not compatible (one value

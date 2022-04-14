@@ -34,7 +34,7 @@ class ResultTable {
    */
   vector<size_t> _sortedBy;
 
-  IdTable _data;
+  IdTable _idTable;
 
   vector<ResultType> _resultTypes;
 
@@ -49,31 +49,30 @@ class ResultTable {
   // due to later use.
   // WARNING: Currently only operations that can run after a GroupBy copy
   //          the _localVocab of a subresult.
-  std::shared_ptr<vector<string>> _localVocab;
+  using LocalVocab = vector<string>;
+  std::shared_ptr<LocalVocab> _localVocab;
 
-  ResultTable(ad_utility::AllocatorWithLimit<Id> allocator);
+  explicit ResultTable(ad_utility::AllocatorWithLimit<Id> allocator);
 
   ResultTable(const ResultTable& other) = delete;
 
-  ResultTable(ResultTable&& other) = delete;
+  ResultTable(ResultTable&& other) = default;
 
-  ResultTable& operator=(ResultTable other) = delete;
+  ResultTable& operator=(const ResultTable& other) = delete;
 
-  ResultTable& operator=(ResultTable&& other) = delete;
+  ResultTable& operator=(ResultTable&& other) = default;
 
   virtual ~ResultTable();
 
-  std::optional<std::string> idToOptionalString(Id id) const {
-    if (id < _localVocab->size()) {
-      return (*_localVocab)[id];
-    } else if (id == ID_NO_VALUE) {
-      return std::nullopt;
+  std::optional<std::string> indexToOptionalString(LocalVocabIndex idx) const {
+    if (idx.get() < _localVocab->size()) {
+      return (*_localVocab)[idx.get()];
     }
     return std::nullopt;
   }
 
   size_t size() const;
-  size_t width() const { return _data.cols(); }
+  size_t width() const { return _idTable.cols(); }
 
   void clear();
 

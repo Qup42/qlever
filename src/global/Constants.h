@@ -5,6 +5,7 @@
 
 #include <stdexcept>
 #include <string>
+#include "../util/Parameters.h"
 
 // UNIPROT HACK (Hannah 15.04.2021): For the UniProt build, use more memory for
 // sorting to avoid three passes over the data (should be configurable anyway).
@@ -14,18 +15,9 @@ static const size_t STXXL_DISK_SIZE_INDEX_TEST = 10;
 
 static constexpr size_t DEFAULT_MEM_FOR_QUERIES_IN_GB = 4;
 
-static const size_t DEFAULT_CACHE_MAX_NUM_ENTRIES = 1000;
-static const size_t DEFAULT_CACHE_MAX_SIZE_GB = 30;
-static const size_t DEFAULT_CACHE_MAX_SIZE_GB_SINGLE_ENTRY = 5;
 static const size_t MAX_NOF_ROWS_IN_RESULT = 100000;
 static const size_t MIN_WORD_PREFIX_SIZE = 4;
 static const char PREFIX_CHAR = '*';
-static const char EXTERNALIZED_LITERALS_PREFIX_CHAR{127};
-static const std::string EXTERNALIZED_LITERALS_PREFIX{
-    EXTERNALIZED_LITERALS_PREFIX_CHAR};
-static const char EXTERNALIZED_ENTITIES_PREFIX_CHAR{static_cast<char>(128)};
-static const std::string EXTERNALIZED_ENTITIES_PREFIX{
-    EXTERNALIZED_ENTITIES_PREFIX_CHAR};
 static const size_t MAX_NOF_NODES = 64;
 static const size_t MAX_NOF_FILTERS = 64;
 
@@ -58,22 +50,26 @@ static const std::string LANGUAGE_PREDICATE = URI_PREFIX + "langtag>";
 static const char VALUE_PREFIX[] = ":v:";
 static const char VALUE_DATE_PREFIX[] = ":v:date:";
 static const char VALUE_FLOAT_PREFIX[] = ":v:float:";
-static const char XSD_DATETIME_SUFFIX[] =
-    "^^<http://www.w3.org/2001/XMLSchema#dateTime>";
-static const char XSD_INT_SUFFIX[] = "^^<http://www.w3.org/2001/XMLSchema#int>";
-static const char XSD_FLOAT_SUFFIX[] =
-    "^^<http://www.w3.org/2001/XMLSchema#float>";
-static const char XSD_DOUBLE_SUFFIX[] =
-    "^^<http://www.w3.org/2001/XMLSchema#double>";
-static const char XSD_DECIMAL_SUFFIX[] =
-    "^^<http://www.w3.org/2001/XMLSchema#decimal>";
+static const char XSD_DATETIME_TYPE[] =
+    "http://www.w3.org/2001/XMLSchema#dateTime";
+static const char XSD_INT_TYPE[] = "http://www.w3.org/2001/XMLSchema#int";
+static const char XSD_INTEGER_TYPE[] =
+    "http://www.w3.org/2001/XMLSchema#integer";
+static const char XSD_FLOAT_TYPE[] = "http://www.w3.org/2001/XMLSchema#float";
+static const char XSD_DOUBLE_TYPE[] = "http://www.w3.org/2001/XMLSchema#double";
+static const char XSD_DECIMAL_TYPE[] =
+    "http://www.w3.org/2001/XMLSchema#decimal";
+static const char XSD_BOOLEAN_TYPE[] =
+    "http://www.w3.org/2001/XMLSchema#boolean";
 static const char VALUE_DATE_TIME_SEPARATOR[] = "T";
 static const int DEFAULT_NOF_VALUE_INTEGER_DIGITS = 50;
 static const int DEFAULT_NOF_VALUE_EXPONENT_DIGITS = 20;
 static const int DEFAULT_NOF_VALUE_MANTISSA_DIGITS = 30;
 static const int DEFAULT_NOF_DATE_YEAR_DIGITS = 19;
 
-static const std::string MMAP_FILE_SUFFIX = ".meta-mmap";
+static const std::string INTERNAL_VOCAB_SUFFIX = ".vocabulary.internal";
+static const std::string EXTERNAL_VOCAB_SUFFIX = ".vocabulary.external";
+static const std::string MMAP_FILE_SUFFIX = ".meta";
 static const std::string CONFIGURATION_FILE = ".meta-data.json";
 static const std::string PREFIX_FILE = ".prefixes";
 
@@ -82,16 +78,13 @@ static const std::string ERROR_IGNORE_CASE_UNSUPPORTED =
     "your settings.json and rebuild your index. You can optionally specify the "
     "\"locale\" key, otherwise \"en.US\" will be used as default";
 static const std::string WARNING_ASCII_ONLY_PREFIXES =
-    "You requested the CTRE parser for tokenization (either via "
-    "ascii-prefixes-only = true in the settings.json or by requesting it "
-    "explicitly in TurtleParserMain). This means that the input Turtle data "
-    "may only use characters from the ASCII range and that no escape sequences "
-    "may be used in prefixed names (e.g., rdfs:label\\,el is not allowed). "
-    " Additionally, multiline literals are not allowed and triples have to end "
-    "at line boundaries (The regex \". *\\n\" must safely identify the end of "
-    "a triple)."
-    "This is stricter than the SPARQL standard but makes parsing faster. It "
-    "works for many Turtle dumps, e.g. that from Wikidata.";
+    "You specified \"ascii-prefixes-only = true\", which enables faster "
+    "parsing for well-behaved TTL files";
+// " but only works correctly if there are no escape sequences in "
+// "prefixed names (e.g., rdfs:label\\,el is not allowed), no multiline "
+// "literals, and the regex \". *\\n\" only matches at the end of a triple. "
+// "Most Turtle files fulfill these properties (e.g. that from Wikidata), "
+// "but not all";
 static const std::string LOCALE_DEFAULT_LANG = "en";
 static const std::string LOCALE_DEFAULT_COUNTRY = "US";
 static constexpr bool LOCALE_DEFAULT_IGNORE_PUNCTUATION = false;
@@ -116,13 +109,30 @@ static constexpr size_t NUM_OPERATIONS_BETWEEN_TIMEOUT_CHECKS = 32000;
 // operation
 static constexpr size_t NUM_OPERATIONS_HASHSET_LOOKUP = 32;
 
-// If the time estimate for a sort operation is larger by more than this factor
-// than the remaining time, then the sort is canceled with a timeout exception
-static constexpr double SORT_ESTIMATE_CANCELLATION_FACTOR = 3.0;
-
 // When initializing a sort performance estimator, at most this percentage of
 // the number of triples in the index is being sorted at once.
 static constexpr size_t PERCENTAGE_OF_TRIPLES_FOR_SORT_ESTIMATE = 5;
+
+// When asked to make room for X ids in the cache, actually make room for X
+// times this factor.
+static constexpr double MAKE_ROOM_SLACK_FACTOR = 2;
+
+// The version of the binary format of the pattern files. Has to be increased,
+// when this format is changed.
+static constexpr uint32_t PATTERNS_FILE_VERSION = 1;
+
+inline auto& RuntimeParameters() {
+  using ad_utility::detail::parameterShortNames::Double;
+  using ad_utility::detail::parameterShortNames::SizeT;
+  static ad_utility::Parameters params{
+      // If the time estimate for a sort operation is larger by more than this
+      // factor than the remaining time, then the sort is canceled with a
+      // timeout exception.
+      Double<"sort-estimate-cancellation-factor">{3.0},
+      SizeT<"cache-max-num-entries">{1000}, SizeT<"cache-max-size-gb">{30},
+      SizeT<"cache-max-size-gb-single-entry">{5}};
+  return params;
+}
 
 #ifdef _PARALLEL_SORT
 static constexpr bool USE_PARALLEL_SORT = true;

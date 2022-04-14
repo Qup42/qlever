@@ -5,30 +5,32 @@
 
 #include <array>
 #include <fstream>
-#include <google/sparse_hash_set>
 #include <memory>
-#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
+#include <stxxl/sorter>
+#include <stxxl/stream>
 #include <stxxl/vector>
 #include <vector>
 
 #include "../engine/ResultTable.h"
 #include "../global/Pattern.h"
-#include "../parser/NTriplesParser.h"
-#include "../parser/TsvParser.h"
 #include "../parser/TurtleParser.h"
+#include "../util/BackgroundStxxlSorter.h"
 #include "../util/BufferedVector.h"
 #include "../util/CompressionUsingZstd/ZstdWrapper.h"
 #include "../util/File.h"
+#include "../util/Forward.h"
 #include "../util/HashMap.h"
 #include "../util/MmapVector.h"
 #include "../util/Timer.h"
+#include "../util/json.h"
 #include "./CompressedRelation.h"
 #include "./ConstantsIndexBuilding.h"
 #include "./DocsDB.h"
 #include "./IndexBuilderTypes.h"
 #include "./IndexMetaData.h"
+#include "./PatternCreator.h"
 #include "./Permutations.h"
 #include "./StxxlSortFunctors.h"
 #include "./TextMetaData.h"
@@ -45,34 +47,57 @@ using std::vector;
 
 using json = nlohmann::json;
 
-// a simple struct for better naming
-struct VocabularyData {
-  using TripleVec = stxxl::vector<array<Id, 3>>;
+template <typename Comparator>
+using StxxlSorter =
+    ad_utility::BackgroundStxxlSorter<std::array<Id, 3>, Comparator>;
+
+using PsoSorter = StxxlSorter<SortByPSO>;
+
+// Several data that are passed along between different phases of the
+// index builder.
+struct IndexBuilderDataBase {
   // The total number of distinct words in the complete Vocabulary
   size_t nofWords;
   // Id lower and upper bound of @lang@<predicate> predicates
   Id langPredLowerBound;
   Id langPredUpperBound;
-  // The number of triples in the idTriples vec that each partial vocabulary is
-  // responsible for (depends on the number of additional language filter
-  // triples)
-  std::vector<size_t> actualPartialSizes;
+};
+
+// All the data from IndexBuilderDataBase and a stxxl::vector of (unsorted) ID
+// triples.
+struct IndexBuilderDataAsStxxlVector : IndexBuilderDataBase {
+  using TripleVec = stxxl::vector<array<Id, 3>>;
   // All the triples as Ids.
   std::unique_ptr<TripleVec> idTriples;
+  // The number of triples for each partial vocabulary. This also depends on the
+  // number of additional language filter triples.
+  std::vector<size_t> actualPartialSizes;
+};
+
+// All the data from IndexBuilderDataBase and a StxxlSorter that stores all ID
+// triples sorted by the PSO permutation.
+struct IndexBuilderDataAsPsoSorter : IndexBuilderDataBase {
+  using SorterPtr = std::unique_ptr<StxxlSorter<SortByPSO>>;
+  SorterPtr psoSorter;
+  IndexBuilderDataAsPsoSorter(const IndexBuilderDataBase& base,
+                              SorterPtr sorter)
+      : IndexBuilderDataBase{base}, psoSorter{std::move(sorter)} {}
+  IndexBuilderDataAsPsoSorter() = default;
 };
 
 /**
  * Used as a Template Argument to the createFromFile method, when we do not yet
  * know, which Tokenizer Specialization of the TurtleParser we are going to use
  */
-class TurtleParserDummy {};
+class TurtleParserAuto {};
 
 class Index {
  public:
   using TripleVec = stxxl::vector<array<Id, 3>>;
   // Block Id, Context Id, Word Id, Score, entity
-  using TextVec = stxxl::vector<tuple<Id, Id, Id, Score, bool>>;
-  using Posting = std::tuple<Id, Id, Score>;
+  using TextVec = stxxl::vector<
+      tuple<TextBlockIndex, TextRecordIndex, WordOrEntityIndex, Score, bool>>;
+  using Posting = std::tuple<TextRecordIndex, WordIndex, Score>;
 
   // Forbid copy and assignment
   Index& operator=(const Index&) = delete;
@@ -125,14 +150,6 @@ class Index {
   template <class Parser>
   void createFromFile(const string& filename);
 
-  /**
-   * @brief create an Index from a turtle file
-   * Determine from the settings, which Tokenizer regex engine (google re2 or
-   * ctre) should be used
-   * @param filename
-   */
-  void createFromTurtleFile(const string& filename);
-
   void addPatternsToExistingIndex();
 
   // Creates an index object from an on disk index
@@ -176,13 +193,30 @@ class Index {
   size_t sizeEstimate(const string& sub, const string& pred,
                       const string& obj) const;
 
+  // TODO<joka921> The following three functions have to be adapted when we
+  // have the "fancy" or "folded" Ids.
   std::optional<string> idToOptionalString(Id id) const {
-    return _vocab.idToOptionalString(id);
+    if (id == ID_NO_VALUE) {
+      return std::nullopt;
+    }
+    return _vocab.indexToOptionalString(VocabIndex::make(id.get()));
+  }
+
+  bool getId(const string& element, Id* id) const {
+    VocabIndex vocabId;
+    auto success = getVocab().getId(element, &vocabId);
+    *id = Id::make(vocabId.get());
+    return success;
+  }
+
+  std::pair<Id, Id> prefix_range(const std::string& prefix) const {
+    auto [begin, end] = _vocab.prefix_range(prefix);
+    return {Id::make(begin.get()), Id::make(end.get())};
   }
 
   const vector<PatternID>& getHasPattern() const;
-  const CompactStringVector<Id, Id>& getHasPredicate() const;
-  const CompactStringVector<size_t, Id>& getPatterns() const;
+  const CompactVectorOfStrings<Id>& getHasPredicate() const;
+  const CompactVectorOfStrings<Id>& getPatterns() const;
   /**
    * @return The multiplicity of the Entites column (0) of the full has-relation
    *         relation after unrolling the patterns.
@@ -204,7 +238,7 @@ class Index {
   // --------------------------------------------------------------------------
   // TEXT RETRIEVAL
   // --------------------------------------------------------------------------
-  const string& wordIdToString(Id id) const;
+  std::string_view wordIdToString(WordIndex wordIndex) const;
 
   size_t getSizeEstimate(const string& words) const;
 
@@ -229,7 +263,8 @@ class Index {
                                          const IdTable& filter, size_t nofVars,
                                          size_t limit, IdTable* result) const;
 
-  void getContextEntityScoreListsForWords(const string& words, vector<Id>& cids,
+  void getContextEntityScoreListsForWords(const string& words,
+                                          vector<TextRecordIndex>& cids,
                                           vector<Id>& eids,
                                           vector<Score>& scores) const;
 
@@ -250,18 +285,18 @@ class Index {
       const vector<ad_utility::HashMap<Id, vector<vector<Id>>>>& subResVecs,
       size_t limit, vector<vector<Id>>& res) const;
 
-  void getWordPostingsForTerm(const string& term, vector<Id>& cids,
+  void getWordPostingsForTerm(const string& term, vector<TextRecordIndex>& cids,
                               vector<Score>& scores) const;
 
-  void getEntityPostingsForTerm(const string& term, vector<Id>& cids,
-                                vector<Id>& eids, vector<Score>& scores) const;
+  void getEntityPostingsForTerm(const string& term,
+                                vector<TextRecordIndex>& cids, vector<Id>& eids,
+                                vector<Score>& scores) const;
 
-  string getTextExcerpt(Id cid) const {
-    if (cid == ID_NO_VALUE) {
-      return std::string();
-    } else {
-      return _docsDB.getTextExcerpt(cid);
+  string getTextExcerpt(TextRecordIndex cid) const {
+    if (cid.get() >= _docsDB._size) {
+      return "";
     }
+    return _docsDB.getTextExcerpt(cid);
   }
 
   // Only for debug reasons and external encoding tests.
@@ -280,6 +315,8 @@ class Index {
 
   void setUsePatterns(bool usePatterns);
 
+  void setLoadAllPermutations(bool loadAllPermutations);
+
   void setOnDiskLiterals(bool onDiskLiterals);
 
   void setKeepTempFiles(bool keepTempFiles);
@@ -289,6 +326,10 @@ class Index {
   void setSettingsFile(const std::string& filename);
 
   void setPrefixCompression(bool compressed);
+
+  void setNumTriplesPerBatch(uint64_t numTriplesPerBatch) {
+    _numTriplesPerBatch = numTriplesPerBatch;
+  }
 
   const string& getTextName() const { return _textMeta.getName(); }
 
@@ -326,7 +367,7 @@ class Index {
 
   size_t getNofPredicates() const { return _PSO.metaData().getNofDistinctC1(); }
 
-  bool hasAllPermutations() const { return SPO()._file.isOpen(); }
+  bool hasAllPermutations() const { return SPO()._isLoaded; }
 
   // _____________________________________________________________________________
   template <class PermutationImpl>
@@ -334,7 +375,7 @@ class Index {
                                   const PermutationImpl& p) const {
     Id keyId;
     vector<float> res;
-    if (_vocab.getId(key, &keyId) && p._meta.col0IdExists(keyId)) {
+    if (getId(key, &keyId) && p._meta.col0IdExists(keyId)) {
       auto metaData = p._meta.getMetaData(keyId);
       res.push_back(metaData.getCol1Multiplicity());
       res.push_back(metaData.getCol2Multiplicity());
@@ -388,7 +429,7 @@ class Index {
     LOG(DEBUG) << "Performing " << p._readableName
                << " scan for full list for: " << key << "\n";
     Id relId;
-    if (_vocab.getId(key, &relId)) {
+    if (getId(key, &relId)) {
       LOG(TRACE) << "Successfully got key ID.\n";
       scan(relId, result, p, std::move(timer));
     }
@@ -416,8 +457,7 @@ class Index {
             ad_utility::SharedConcurrentTimeoutTimer timer = nullptr) const {
     Id col0Id;
     Id col1Id;
-    if (!_vocab.getId(col0String, &col0Id) ||
-        !_vocab.getId(col1String, &col1Id)) {
+    if (!getId(col0String, &col0Id) || !getId(col1String, &col1Id)) {
       LOG(DEBUG) << "Key " << col0String << " or key " << col1String
                  << " were not found in the vocabulary \n";
       return;
@@ -434,6 +474,9 @@ class Index {
   string _onDiskBase;
   string _settingsFileName;
   bool _onlyAsciiTurtlePrefixes = false;
+  TurtleParserIntegerOverflowBehavior _turtleParserIntegerOverflowBehavior =
+      TurtleParserIntegerOverflowBehavior::Error;
+  bool _turtleParserSkipIllegalLiterals = false;
   bool _onDiskLiterals = false;
   bool _keepTempFiles = false;
   json _configurationJson;
@@ -444,24 +487,25 @@ class Index {
 
   TextMetaData _textMeta;
   DocsDB _docsDB;
-  vector<Id> _blockBoundaries;
+  vector<WordIndex> _blockBoundaries;
   off_t _currentoff_t;
   mutable ad_utility::File _textIndexFile;
 
+  // If false, only PSO and POS permutations are loaded and expected.
+  bool _loadAllPermutations = true;
+
   // Pattern trick data
-  static const uint32_t PATTERNS_FILE_VERSION;
   bool _usePatterns;
-  size_t _maxNumPatterns;
   double _fullHasPredicateMultiplicityEntities;
   double _fullHasPredicateMultiplicityPredicates;
   size_t _fullHasPredicateSize;
 
   size_t _parserBatchSize = PARSER_BATCH_SIZE;
-  size_t _numTriplesPerPartialVocab = NUM_TRIPLES_PER_PARTIAL_VOCAB;
+  size_t _numTriplesPerBatch = NUM_TRIPLES_PER_PARTIAL_VOCAB;
   /**
    * @brief Maps pattern ids to sets of predicate ids.
    */
-  CompactStringVector<size_t, Id> _patterns;
+  CompactVectorOfStrings<Id> _patterns;
   /**
    * @brief Maps entity ids to pattern ids.
    */
@@ -469,7 +513,7 @@ class Index {
   /**
    * @brief Maps entity ids to sets of predicate ids
    */
-  CompactStringVector<Id, Id> _hasPredicate;
+  CompactVectorOfStrings<Id> _hasPredicate;
 
   // Create Vocabulary and directly write it to disk. Create TripleVec with all
   // the triples converted to id space. This Vec can be used for creating
@@ -477,12 +521,12 @@ class Index {
   // needed for index creation once the TripleVec is set up and it would be a
   // waste of RAM.
   template <class Parser>
-  VocabularyData createIdTriplesAndVocab(const string& ntFile);
+  IndexBuilderDataAsPsoSorter createIdTriplesAndVocab(const string& ntFile);
 
   // ___________________________________________________________________
   template <class Parser>
-  VocabularyData passFileForVocabulary(const string& ntFile,
-                                       size_t linesPerPartial);
+  IndexBuilderDataAsStxxlVector passFileForVocabulary(const string& ntFile,
+                                                      size_t linesPerPartial);
 
   /**
    * @brief Everything that has to be done when we have seen all the triples
@@ -500,23 +544,23 @@ class Index {
    */
   std::future<void> writeNextPartialVocabulary(
       size_t numLines, size_t numFiles, size_t actualCurrentPartialSize,
-      std::unique_ptr<ItemMapArray> items, std::unique_ptr<TripleVec> localIds,
+      std::unique_ptr<ItemMapArray> items, auto localIds,
       ad_utility::Synchronized<TripleVec::bufwriter_type>* globalWritePtr);
 
-  void convertPartialToGlobalIds(TripleVec& data,
-                                 const vector<size_t>& actualLinesPerPartial,
-                                 size_t linesPerPartial);
+  std::unique_ptr<StxxlSorter<SortByPSO>> convertPartialToGlobalIds(
+      TripleVec& data, const vector<size_t>& actualLinesPerPartial,
+      size_t linesPerPartial);
 
   size_t passContextFileForVocabulary(const string& contextFile);
 
   void passContextFileIntoVector(const string& contextFile, TextVec& vec);
 
-  template <class MetaDataDispatcher>
+  template <class MetaDataDispatcher, typename SortedTriples>
   std::optional<std::pair<typename MetaDataDispatcher::WriteType,
                           typename MetaDataDispatcher::WriteType>>
   createPermutationPairImpl(const string& fileName1, const string& fileName2,
-                            const Index::TripleVec& vec, size_t c0, size_t c1,
-                            size_t c2);
+                            SortedTriples&& sortedTriples, size_t c0, size_t c1,
+                            size_t c2, auto&&... perTripleCallbacks);
 
   void writeSwitchedRel(CompressedRelationWriter* out, Id currentRel,
                         ad_utility::BufferedVector<array<Id, 2>>* bufPtr);
@@ -531,14 +575,15 @@ class Index {
   // createPatternsAfterFirst is only valid when  the pair is SPO-SOP because
   // the SPO permutation is also needed for patterns (see usage in
   // Index::createFromFile function)
+
   template <class MetaDataDispatcher, class Comparator1, class Comparator2>
   void createPermutationPair(
-      VocabularyData* vec,
+      auto&& sortedTriples,
       const PermutationImpl<Comparator1, typename MetaDataDispatcher::ReadType>&
           p1,
       const PermutationImpl<Comparator2, typename MetaDataDispatcher::ReadType>&
           p2,
-      bool performUnique = false, bool createPatternsAfterFirst = false);
+      auto&&... perTripleCallbacks);
 
   // The pairs of permutations are PSO-POS, OSP-OPS and SPO-SOP
   // the multiplicity of column 1 in partner 1 of the pair is equal to the
@@ -561,39 +606,12 @@ class Index {
   std::optional<std::pair<typename MetaDataDispatcher::WriteType,
                           typename MetaDataDispatcher::WriteType>>
   createPermutations(
-      TripleVec* vec,
+      auto&& sortedTriples,
       const PermutationImpl<Comparator1, typename MetaDataDispatcher::ReadType>&
           p1,
       const PermutationImpl<Comparator2, typename MetaDataDispatcher::ReadType>&
           p2,
-      bool performUnique);
-
-  /**
-   * @brief Creates the data required for the "pattern-trick" used for fast
-   *        ql:has-relation evaluation when selection relation counts.
-   * @param fileName The name of the file in which the data should be stored
-   * @param args The arguments that need to be passed to the constructor of
-   *             VecReaderType. VecReaderType should allow for iterating over
-   *             the tuples of the spo permutation after having been constructed
-   *             using args.
-   */
-  template <typename VecReaderType, typename... Args>
-  void createPatternsImpl(const string& fileName,
-                          CompactStringVector<Id, Id>& hasPredicate,
-                          std::vector<PatternID>& hasPattern,
-                          CompactStringVector<size_t, Id>& patterns,
-                          double& fullHasPredicateMultiplicityEntities,
-                          double& fullHasPredicateMultiplicityPredicates,
-                          size_t& fullHasPredicateSize,
-                          const size_t maxNumPatterns,
-                          const Id langPredLowerBound,
-                          const Id langPredUpperBound,
-                          const Args&... vecReaderArgs);
-
-  // wrap the static function using the internal member variables
-  // the bool indicates wether the TripleVec has to be sorted before the pattern
-  // creation
-  void createPatterns(bool vecAlreadySorted, VocabularyData* idTriples);
+      auto&&... perTripleCallbacks);
 
   void createTextIndex(const string& filename, const TextVec& vec);
 
@@ -603,8 +621,9 @@ class Index {
 
   void openTextFileHandle();
 
-  void addContextToVector(TextVec::bufwriter_type& writer, Id context,
-                          const ad_utility::HashMap<Id, Score>& words,
+  void addContextToVector(TextVec::bufwriter_type& writer,
+                          TextRecordIndex context,
+                          const ad_utility::HashMap<WordIndex, Score>& words,
                           const ad_utility::HashMap<Id, Score>& entities);
 
   template <typename T>
@@ -617,13 +636,32 @@ class Index {
 
   size_t getIndexOfBestSuitedElTerm(const vector<string>& terms) const;
 
+  /// Calculate the block boundaries for the text index. The boundary of a
+  /// block is the index in the `_textVocab` of the last word that belongs
+  /// to this block.
+  /// This implementation takes a reference to an `Index` and a callable,
+  /// that is called once for each blockBoundary, with the `size_t`
+  /// blockBoundary as a parameter. Internally uses
+  /// `calculateBlockBoundariesImpl`.
+  template <typename I, typename BlockBoundaryAction>
+  static void calculateBlockBoundariesImpl(
+      I&& index, const BlockBoundaryAction& blockBoundaryAction);
+
+  /// Calculate the block boundaries for the text index, and store them in the
+  /// _blockBoundaries member.
   void calculateBlockBoundaries();
 
-  Id getWordBlockId(Id wordId) const;
+  /// Calculate the block boundaries for the text index, and store the
+  /// corresponding words in a human-readable text file at `filename`.
+  /// This is for debugging the text index. Internally uses
+  /// `caluclateBlockBoundariesImpl`.
+  void printBlockBoundariesToFile(const string& filename) const;
 
-  Id getEntityBlockId(Id entityId) const;
+  TextBlockIndex getWordBlockId(WordIndex wordIndex) const;
 
-  bool isEntityBlockId(Id blockId) const;
+  TextBlockIndex getEntityBlockId(Id entityId) const;
+
+  bool isEntityBlockId(TextBlockIndex blockIndex) const;
 
   //! Writes a list of elements (have to be able to be cast to unit64_t)
   //! to file.
@@ -632,14 +670,16 @@ class Index {
   size_t writeList(Numeric* data, size_t nofElements,
                    ad_utility::File& file) const;
 
-  typedef ad_utility::HashMap<Id, Id> IdCodeMap;
+  // TODO<joka921> understand what the "codes" are, are they better just ints?
+  typedef ad_utility::HashMap<WordIndex, CompressionCode> WordToCodeMap;
   typedef ad_utility::HashMap<Score, Score> ScoreCodeMap;
-  typedef vector<Id> IdCodebook;
+  typedef vector<CompressionCode> WordCodebook;
   typedef vector<Score> ScoreCodebook;
 
   //! Creates codebooks for lists that are supposed to be entropy encoded.
-  void createCodebooks(const vector<Posting>& postings, IdCodeMap& wordCodemap,
-                       IdCodebook& wordCodebook, ScoreCodeMap& scoreCodemap,
+  void createCodebooks(const vector<Posting>& postings,
+                       WordToCodeMap& wordCodemap, WordCodebook& wordCodebook,
+                       ScoreCodeMap& scoreCodemap,
                        ScoreCodebook& scoreCodebook) const;
 
   template <class T>
@@ -662,7 +702,7 @@ class Index {
   // and add externalization characters if necessary.
   // Returns the language tag of spo[2] (the object) or ""
   // if there is none.
-  LangtagAndTriple tripleToInternalRepresentation(Triple&& spo);
+  LangtagAndTriple tripleToInternalRepresentation(TurtleTriple&& triple);
 
   /**
    * @brief Throws an exception if no patterns are loaded. Should be called from
@@ -676,7 +716,7 @@ class Index {
 
   // initialize the index-build-time settings for the vocabulary
   template <class Parser>
-  void initializeVocabularySettingsBuild();
+  void readIndexBuilderSettingsFromFile();
 
   // Helper function for Debugging during the index build.
   // ExtVecs are not persistent, so we dump them to a mmapVector in a file with
@@ -705,17 +745,17 @@ class Index {
   // predicate starts with @) and all other triples (that were actually part of
   // the input).
   std::pair<size_t, size_t> getNumTriplesActuallyAndAdded() const {
-    auto [begin, end] = _vocab.prefix_range("@");
+    auto [begin, end] = prefix_range("@");
     Id qleverLangtag;
     auto actualTriples = 0ul;
     auto addedTriples = 0ul;
-    bool foundQleverLangtag = _vocab.getId(LANGUAGE_PREDICATE, &qleverLangtag);
+    bool foundQleverLangtag = getId(LANGUAGE_PREDICATE, &qleverLangtag);
     AD_CHECK(foundQleverLangtag);
     // Use the PSO index to get the number of triples for each predicate and add
     // to the respective counter.
     for (const auto& [key, value] : PSO()._meta.data()) {
       auto numTriples = value.getNofElements();
-      if (key == qleverLangtag || (key >= begin && key < end)) {
+      if (key == qleverLangtag || (begin <= key && key < end)) {
         addedTriples += numTriples;
       } else {
         actualTriples += numTriples;

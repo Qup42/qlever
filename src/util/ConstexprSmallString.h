@@ -4,7 +4,11 @@
 
 #pragma once
 
+#include <array>
 #include <cstring>
+#include <exception>
+#include <string>
+#include <string_view>
 
 namespace ad_utility {
 /// A String/character array that can be constructed at compile time. It can
@@ -14,7 +18,7 @@ template <size_t MaxSize>
 struct ConstexprSmallString {
   // Data members have to be public, else we cannot use ConstexprSmallStrings as
   // template parameters
-  char _characters[MaxSize] = {0};
+  std::array<char, MaxSize> _characters = {0};
   std::size_t _size = 0;
 
   /// Construct (possibly at compile time) from input char array or input const
@@ -56,13 +60,24 @@ struct ConstexprSmallString {
   /// Return the size without counting the '\0' at the end.
   constexpr std::size_t size() const { return _size; }
 
-  /// Compare for equality.
-  bool operator==(const ConstexprSmallString& rhs) const {
-    return !std::strcmp(_characters, rhs._characters);
+  // TODO<C++20, joka921> implement operator<=> as soon as it works
+  // on std::array.
+  constexpr bool operator==(const ConstexprSmallString& rhs) const {
+    return _characters == rhs._characters;
+  }
+
+  constexpr bool operator<(const ConstexprSmallString& rhs) const {
+    return _characters < rhs._characters;
   }
 
   /// Implicit conversion to std::string_view
-  operator string_view() const { return {_characters, _size}; }
+  operator std::string_view() const { return {_characters.data(), _size}; }
+
+  friend std::ostream& operator<<(std::ostream& stream,
+                                  const ConstexprSmallString& string) {
+    stream << std::string_view{string};
+    return stream;
+  }
 };
 }  // namespace ad_utility
 

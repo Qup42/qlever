@@ -5,21 +5,19 @@ Arch Linux.
 
 For Ubuntu 18.04 the following packages are required
 
-* build-essential cmake libsparsehash-dev libicu-dev
+* build-essential cmake libicu-dev
 * wget python3-yaml unzip curl (for End-to-End Tests)
 
 This roughly translates to
 
 * GCC >= 7.x
 * CMake >= 2.8.4
-* Google's sparsehash >= 2.02
 * python >= 3.6 (for End-to-End Tests with type hints)
 * python-yaml >= 3.10
 
-
 ## Build and run unit tests
 
-Go to a folder where you want to build the binaries.  Usually this is done
+Go to a folder where you want to build the binaries. Usually this is done
 with a separate `build` subfolder. This is also assumed by the `e2e/e2e.sh`
 script.
 
@@ -42,11 +40,12 @@ either add `./build/` to your path or prefix all commands with `./` and that
 
 * Without text collection:
 
-    ./ServerMain -i /path/to/myindex -p <PORT>
+      ./ServerMain -i /path/to/myindex -p <PORT>
+
 
 * With text collection:
 
-    ./ServerMain -i /path/to/myindex -p <PORT> -t
+      ./ServerMain -i /path/to/myindex -p <PORT> -t
 
 Depending on if you built the index with the -a version, two or six index permutations will be registered.
 For some data this can be a significant difference in memory consumption.

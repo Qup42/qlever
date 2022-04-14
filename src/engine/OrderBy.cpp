@@ -24,22 +24,21 @@ OrderBy::OrderBy(QueryExecutionContext* qec,
       _sortIndices(std::move(sortIndices)) {}
 
 // _____________________________________________________________________________
-string OrderBy::asString(size_t indent) const {
+string OrderBy::asStringImpl(size_t indent) const {
   std::ostringstream os;
   for (size_t i = 0; i < indent; ++i) {
     os << " ";
   }
+  os << "SORT / ORDER BY on columns:";
 
-  std::stringstream columns;
   // TODO<joka921> This produces exactly the same format as SORT operations
   // which is crucial for caching. Please refactor those classes to one class
   // (this is only an optimization for sorts on a single column)
   for (auto ind : _sortIndices) {
-    columns << (ind.second ? "desc(" : "asc(") << ind.first << ") ";
+    os << (ind.second ? "desc(" : "asc(") << ind.first << ") ";
   }
-  os << "SORT / ORDER BY on columns:" << columns.str() << "\n"
-     << _subtree->asString(indent);
-  return os.str();
+  os << "\n" << _subtree->asString(indent);
+  return std::move(os).str();
 }
 
 // _____________________________________________________________________________
@@ -82,32 +81,34 @@ void OrderBy::computeResult(ResultTable* result) {
   double remainingSecs =
       static_cast<double>(_timeoutTimer->wlock()->remainingMicroseconds()) /
       1'000'000;
+  auto sortEstimateCancellationFactor =
+      RuntimeParameters().get<"sort-estimate-cancellation-factor">();
   if (getExecutionContext()
           ->getSortPerformanceEstimator()
           .estimatedSortTimeInSeconds(subRes->size(), subRes->width()) >
-      remainingSecs * SORT_ESTIMATE_CANCELLATION_FACTOR) {
+      remainingSecs * sortEstimateCancellationFactor) {
     // The estimated time for this sort is much larger than the actually
     // remaining time, cancel this operation
     throw ad_utility::TimeoutException(
         "OrderBy operation was canceled, because time estimate exceeded "
         "remaining time by a factor of " +
-        std::to_string(SORT_ESTIMATE_CANCELLATION_FACTOR));
+        std::to_string(sortEstimateCancellationFactor));
   }
 
   RuntimeInformation& runtimeInfo = getRuntimeInfo();
   runtimeInfo.addChild(_subtree->getRootOperation()->getRuntimeInfo());
   LOG(DEBUG) << "OrderBy result computation..." << endl;
-  result->_data.setCols(subRes->_data.cols());
+  result->_idTable.setCols(subRes->_idTable.cols());
   result->_resultTypes.insert(result->_resultTypes.end(),
                               subRes->_resultTypes.begin(),
                               subRes->_resultTypes.end());
   result->_localVocab = subRes->_localVocab;
-  result->_data.insert(result->_data.end(), subRes->_data.begin(),
-                       subRes->_data.end());
+  result->_idTable.insert(result->_idTable.end(), subRes->_idTable.begin(),
+                          subRes->_idTable.end());
 
-  int width = result->_data.cols();
+  int width = result->_idTable.cols();
   // TODO(florian): Check if the lambda is a performance problem
-  CALL_FIXED_SIZE_1(width, getEngine().sort, &result->_data,
+  CALL_FIXED_SIZE_1(width, getEngine().sort, &result->_idTable,
                     [this](const auto& a, const auto& b) {
                       for (auto& entry : _sortIndices) {
                         if (a[entry.first] < b[entry.first]) {

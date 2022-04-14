@@ -12,7 +12,7 @@ using std::string;
 MultiColumnJoin::MultiColumnJoin(QueryExecutionContext* qec,
                                  std::shared_ptr<QueryExecutionTree> t1,
                                  std::shared_ptr<QueryExecutionTree> t2,
-                                 const vector<array<Id, 2>>& jcs)
+                                 const vector<array<ColumnIndex, 2>>& jcs)
     : Operation(qec), _joinColumns(jcs), _multiplicitiesComputed(false) {
   // Make sure subtrees are ordered so that identical queries can be identified.
   AD_CHECK_GT(jcs.size(), 0);
@@ -32,7 +32,7 @@ MultiColumnJoin::MultiColumnJoin(QueryExecutionContext* qec,
 }
 
 // _____________________________________________________________________________
-string MultiColumnJoin::asString(size_t indent) const {
+string MultiColumnJoin::asStringImpl(size_t indent) const {
   std::ostringstream os;
   for (size_t i = 0; i < indent; ++i) {
     os << " ";
@@ -52,7 +52,7 @@ string MultiColumnJoin::asString(size_t indent) const {
     os << _joinColumns[i][1] << (i < _joinColumns.size() - 1 ? " & " : "");
   };
   os << "]";
-  return os.str();
+  return std::move(os).str();
 }
 
 // _____________________________________________________________________________
@@ -77,9 +77,9 @@ void MultiColumnJoin::computeResult(ResultTable* result) {
 
   RuntimeInformation& runtimeInfo = getRuntimeInfo();
   result->_sortedBy = resultSortedOn();
-  result->_data.setCols(getResultWidth());
+  result->_idTable.setCols(getResultWidth());
 
-  AD_CHECK_GE(result->_data.cols(), _joinColumns.size());
+  AD_CHECK_GE(result->_idTable.cols(), _joinColumns.size());
 
   const auto leftResult = _left->getResult();
   const auto rightResult = _right->getResult();
@@ -90,13 +90,13 @@ void MultiColumnJoin::computeResult(ResultTable* result) {
   LOG(DEBUG) << "MultiColumnJoin subresult computation done." << std::endl;
 
   // compute the result types
-  result->_resultTypes.reserve(result->_data.cols());
+  result->_resultTypes.reserve(result->_idTable.cols());
   result->_resultTypes.insert(result->_resultTypes.end(),
                               leftResult->_resultTypes.begin(),
                               leftResult->_resultTypes.end());
-  for (size_t col = 0; col < rightResult->_data.cols(); col++) {
+  for (size_t col = 0; col < rightResult->_idTable.cols(); col++) {
     bool isJoinColumn = false;
-    for (const std::array<Id, 2>& a : _joinColumns) {
+    for (const std::array<ColumnIndex, 2>& a : _joinColumns) {
       if (a[1] == col) {
         isJoinColumn = true;
         break;
@@ -110,12 +110,12 @@ void MultiColumnJoin::computeResult(ResultTable* result) {
   LOG(DEBUG) << "Computing a multi column join between results of size "
              << leftResult->size() << " and " << rightResult->size() << endl;
 
-  int leftWidth = leftResult->_data.cols();
-  int rightWidth = rightResult->_data.cols();
-  int resWidth = result->_data.cols();
+  int leftWidth = leftResult->_idTable.cols();
+  int rightWidth = rightResult->_idTable.cols();
+  int resWidth = result->_idTable.cols();
   CALL_FIXED_SIZE_3(leftWidth, rightWidth, resWidth, computeMultiColumnJoin,
-                    leftResult->_data, rightResult->_data, _joinColumns,
-                    &result->_data);
+                    leftResult->_idTable, rightResult->_idTable, _joinColumns,
+                    &result->_idTable);
   LOG(DEBUG) << "MultiColumnJoin result computation done." << endl;
 }
 
@@ -124,9 +124,17 @@ ad_utility::HashMap<string, size_t> MultiColumnJoin::getVariableColumns()
     const {
   ad_utility::HashMap<string, size_t> retVal(_left->getVariableColumns());
   size_t columnIndex = retVal.size();
-  for (const auto& it : _right->getVariableColumns()) {
+  const auto variableColumnsRightSorted = [&] {
+    const auto& r = _right->getVariableColumns();
+    using P = std::pair<string, size_t>;
+    std::vector<P> v(r.begin(), r.end());
+    std::sort(v.begin(), v.end(),
+              [](const auto& a, const auto& b) { return a.second < b.second; });
+    return v;
+  }();
+  for (const auto& it : variableColumnsRightSorted) {
     bool isJoinColumn = false;
-    for (const std::array<Id, 2>& a : _joinColumns) {
+    for (const std::array<ColumnIndex, 2>& a : _joinColumns) {
       if (a[1] == it.second) {
         isJoinColumn = true;
         break;

@@ -39,7 +39,7 @@ Filter::Filter(QueryExecutionContext* qec,
 }
 
 // _____________________________________________________________________________
-string Filter::asString(size_t indent) const {
+string Filter::asStringImpl(size_t indent) const {
   std::ostringstream os;
   for (size_t i = 0; i < indent; ++i) {
     os << " ";
@@ -86,7 +86,7 @@ string Filter::asString(size_t indent) const {
     os << " || " << _additionalLhs[i] << " " << _additionalPrefixRegexes[i];
   }
   os << '\n';
-  return os.str();
+  return std::move(os).str();
 }
 
 string Filter::getDescriptor() const {
@@ -129,7 +129,7 @@ string Filter::getDescriptor() const {
   for (size_t i = 0; i < _additionalLhs.size(); ++i) {
     os << " || " << _additionalLhs[i] << " " << _additionalPrefixRegexes[i];
   }
-  return os.str();
+  return std::move(os).str();
 }
 
 // _____________________________________________________________________________
@@ -247,17 +247,18 @@ void Filter::computeResult(ResultTable* result) {
   runtimeInfo.setDescriptor(getDescriptor());
   runtimeInfo.addChild(_subtree->getRootOperation()->getRuntimeInfo());
   LOG(DEBUG) << "Filter result computation..." << endl;
-  result->_data.setCols(subRes->_data.cols());
+  result->_idTable.setCols(subRes->_idTable.cols());
   result->_resultTypes.insert(result->_resultTypes.end(),
                               subRes->_resultTypes.begin(),
                               subRes->_resultTypes.end());
   result->_localVocab = subRes->_localVocab;
   size_t lhsInd = _subtree->getVariableColumn(_lhs);
-  int width = result->_data.cols();
+  int width = result->_idTable.cols();
   if (_rhs[0] == '?') {
     size_t rhsInd = _subtree->getVariableColumn(_rhs);
-    CALL_FIXED_SIZE_1(width, computeResultDynamicValue, &result->_data, lhsInd,
-                      rhsInd, subRes->_data, subRes->getResultType(lhsInd));
+    CALL_FIXED_SIZE_1(width, computeResultDynamicValue, &result->_idTable,
+                      lhsInd, rhsInd, subRes->_idTable,
+                      subRes->getResultType(lhsInd));
   } else {
     // compare the left column to a fixed value
     CALL_FIXED_SIZE_1(width, computeResultFixedValue, result, subRes);
@@ -460,12 +461,13 @@ void Filter::computeFilterFixedValue(
               entity = getIndex().idToOptionalString(e[lhs]);
               (void)subRes;  // Silence unused warning
             } else if (T == ResultTable::ResultType::LOCAL_VOCAB) {
-              entity = subRes->idToOptionalString(e[lhs]);
+              entity = subRes->indexToOptionalString(
+                  LocalVocabIndex::make(e[lhs].get()));
             }
             if (!entity) {
               return true;
             }
-            return ad_utility::endsWith(entity.value(), _rhs);
+            return entity.value().ends_with(_rhs);
           },
           res);
       break;
@@ -474,13 +476,17 @@ void Filter::computeFilterFixedValue(
       // otherwise.
       if constexpr (T == ResultTable::ResultType::KB) {
         // remove the leading '^' symbol
-        ad_utility::HashMap<Id, vector<string>> lhsRhsMap;
+        // TODO<joka921> Is this a "columnIndex"?
+        ad_utility::HashMap<UnknownIndex, vector<string>> lhsRhsMap;
         lhsRhsMap[lhs].push_back(_rhs.substr(1));
         for (size_t i = 0; i < _additionalPrefixRegexes.size(); ++i) {
           lhsRhsMap[_subtree->getVariableColumn(_additionalLhs[i])].push_back(
               _additionalPrefixRegexes[i].substr(1));
         }
-        ad_utility::HashMap<Id, std::vector<std::pair<Id, Id>>> prefixRanges;
+        // TODO<joka921> Is this a "columnIndex"?
+        ad_utility::HashMap<UnknownIndex,
+                            std::vector<std::pair<VocabIndex, VocabIndex>>>
+            prefixRanges;
         // TODO<joka921>: handle Levels correctly;
         for (const auto& [l, r] : lhsRhsMap) {
           for (const auto& pref : r) {
@@ -499,8 +505,8 @@ void Filter::computeFilterFixedValue(
           }
         }
 
-        const std::optional<Id> sortedLhs = [&prefixRanges,
-                                             &subRes]() -> std::optional<Id> {
+        const std::optional<ColumnIndex> sortedLhs =
+            [&prefixRanges, &subRes]() -> std::optional<ColumnIndex> {
           if (prefixRanges.size() > 1 || subRes->_sortedBy.empty() ||
               !prefixRanges.contains(subRes->_sortedBy[0])) {
             return std::nullopt;
@@ -515,7 +521,7 @@ void Filter::computeFilterFixedValue(
           // and last element that match rhs and copy the range.
           for (auto [lowerBound, upperBound] : prefixRanges[*sortedLhs]) {
             AD_CHECK(*sortedLhs == lhs);
-            rhs_array[lhs] = lowerBound;
+            rhs_array[lhs] = Id::make(lowerBound.get());
             const auto& lower =
                 std::lower_bound(input.begin(), input.end(), rhs_row,
                                  [lhs](const auto& l, const auto& r) {
@@ -525,7 +531,7 @@ void Filter::computeFilterFixedValue(
               // There is at least one element in the input that is also within
               // the range, look for the upper boundary and then copy all
               // elements within the range.
-              rhs_array[lhs] = upperBound;
+              rhs_array[lhs] = Id::make(upperBound.get());
               const auto& upper =
                   std::lower_bound(lower, input.end(), rhs_row,
                                    [lhs](const auto& l, const auto& r) {
@@ -550,24 +556,27 @@ void Filter::computeFilterFixedValue(
           if (prefixRanges.size() == 1 && prefixRanges[lhs].size() == 1) {
             getEngine().filter(
                 input,
+                // TODO<joka921> prefixRanges on Ids
                 [lhs, p = prefixRanges[lhs][0]](const auto& e) {
-                  return p.first <= e[lhs] && e[lhs] < p.second;
+                  return Id::make(p.first.get()) <= e[lhs] &&
+                         e[lhs] < Id::make(p.second.get());
                 },
                 res);
           } else {
             getEngine().filter(
                 input,
                 [&prefixRanges](const auto& e) {
-                  return std::any_of(prefixRanges.begin(), prefixRanges.end(),
-                                     [&e](const auto& x) {
-                                       const auto& vec = x.second;
-                                       return std::any_of(
-                                           vec.begin(), vec.end(),
-                                           [&e, &l = x.first](const auto& p) {
-                                             return p.first <= e[l] &&
-                                                    e[l] < p.second;
-                                           });
-                                     });
+                  return std::any_of(
+                      prefixRanges.begin(), prefixRanges.end(),
+                      [&e](const auto& x) {
+                        const auto& vec = x.second;
+                        return std::any_of(
+                            vec.begin(), vec.end(),
+                            [&e, &l = x.first](const auto& p) {
+                              return Id::make(p.first.get()) <= e[l] &&
+                                     e[l] < Id::make(p.second.get());
+                            });
+                      });
                 },
                 res);
           }
@@ -604,7 +613,8 @@ void Filter::computeFilterFixedValue(
             if constexpr (T == ResultTable::ResultType::KB) {
               entity = getIndex().idToOptionalString(e[lhs]);
             } else if (T == ResultTable::ResultType::LOCAL_VOCAB) {
-              entity = subRes->idToOptionalString(e[lhs]);
+              entity = subRes->indexToOptionalString(
+                  LocalVocabIndex::make(e[lhs].get()));
             }
             (void)subRes;  // Silence unused warning.
             (void)this;
@@ -625,8 +635,8 @@ void Filter::computeResultFixedValue(
     ResultTable* resultTable,
     const std::shared_ptr<const ResultTable> subRes) const {
   LOG(DEBUG) << "Filter result computation..." << endl;
-  IdTableStatic<WIDTH> result = resultTable->_data.moveToStatic<WIDTH>();
-  const IdTableView<WIDTH> input = subRes->_data.asStaticView<WIDTH>();
+  IdTableStatic<WIDTH> result = resultTable->_idTable.moveToStatic<WIDTH>();
+  const IdTableView<WIDTH> input = subRes->_idTable.asStaticView<WIDTH>();
 
   if (_lhsAsString) {
     AD_THROW(ad_semsearch::Exception::NOT_YET_IMPLEMENTED,
@@ -664,26 +674,32 @@ void Filter::computeResultFixedValue(
       // TODO<joka921> which level do we want for these filters
       auto level = TripleComponentComparator::Level::QUARTERNARY;
       if (_type == SparqlFilter::EQ || _type == SparqlFilter::NE) {
-        rhs = getIndex().getVocab().lower_bound(rhs_string, level);
-        rhs_upper_for_range =
-            getIndex().getVocab().upper_bound(rhs_string, level);
+        rhs = Id::make(
+            getIndex().getVocab().lower_bound(rhs_string, level).get());
+        rhs_upper_for_range = Id::make(
+            getIndex().getVocab().upper_bound(rhs_string, level).get());
         apply_range_filter = true;
         range_filter_inverse = _type == SparqlFilter::NE;
       } else if (_type == SparqlFilter::GE) {
-        rhs = getIndex().getVocab().getValueIdForGE(rhs_string, level);
+        // TODO<joka921>
+        rhs = Id::make(
+            getIndex().getVocab().getValueIdForGE(rhs_string, level).get());
       } else if (_type == SparqlFilter::GT) {
-        rhs = getIndex().getVocab().getValueIdForGT(rhs_string, level);
+        rhs = Id::make(
+            getIndex().getVocab().getValueIdForGT(rhs_string, level).get());
       } else if (_type == SparqlFilter::LT) {
-        rhs = getIndex().getVocab().getValueIdForLT(rhs_string, level);
+        rhs = Id::make(
+            getIndex().getVocab().getValueIdForLT(rhs_string, level).get());
       } else if (_type == SparqlFilter::LE) {
-        rhs = getIndex().getVocab().getValueIdForLE(rhs_string, level);
+        rhs = Id::make(
+            getIndex().getVocab().getValueIdForLE(rhs_string, level).get());
       }
       // All other types of filters do not use r and work on _rhs directly
       break;
     }
     case ResultTable::ResultType::VERBATIM:
       try {
-        rhs = std::stoull(_rhs);
+        rhs = Id::make(std::stoull(_rhs));
       } catch (const std::logic_error& e) {
         AD_THROW(ad_semsearch::Exception::BAD_QUERY,
                  "A filter filters on an unsigned integer column, but its "
@@ -693,8 +709,9 @@ void Filter::computeResultFixedValue(
       break;
     case ResultTable::ResultType::FLOAT:
       try {
+        rhs = Id::make(0);
         float f = std::stof(_rhs);
-        std::memcpy(&rhs, &f, sizeof(float));
+        std::memcpy(&rhs.get(), &f, sizeof(float));
       } catch (const std::logic_error& e) {
         AD_THROW(
             ad_semsearch::Exception::BAD_QUERY,
@@ -713,8 +730,10 @@ void Filter::computeResultFixedValue(
         // Find a matching entry in subRes' _localVocab. If _rhs is not in the
         // _localVocab of subRes r will be equal to  _localVocab.size() and
         // not match the index of any entry in _localVocab.
-        for (rhs = 0; rhs < subRes->_localVocab->size(); rhs++) {
-          if ((*subRes->_localVocab)[rhs] == _rhs) {
+        rhs = Id::make(subRes->_localVocab->size());
+        for (size_t i = 0; i < subRes->_localVocab->size(); ++i) {
+          if ((*subRes->_localVocab)[i] == _rhs) {
+            rhs = Id::make(i);
             break;
           }
         }
@@ -793,5 +812,5 @@ void Filter::computeResultFixedValue(
     }
   }
   LOG(DEBUG) << "Filter result computation done." << endl;
-  resultTable->_data = result.moveToDynamic();
+  resultTable->_idTable = result.moveToDynamic();
 }

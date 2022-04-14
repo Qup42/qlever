@@ -12,7 +12,7 @@ using std::string;
 TwoColumnJoin::TwoColumnJoin(QueryExecutionContext* qec,
                              std::shared_ptr<QueryExecutionTree> t1,
                              std::shared_ptr<QueryExecutionTree> t2,
-                             const vector<array<Id, 2>>& jcs)
+                             const vector<array<ColumnIndex, 2>>& jcs)
     : Operation(qec) {
   // Make sure subtrees are ordered so that identical queries can be identified.
   AD_CHECK_EQ(jcs.size(), 2);
@@ -49,7 +49,7 @@ TwoColumnJoin::TwoColumnJoin(QueryExecutionContext* qec,
 }
 
 // _____________________________________________________________________________
-string TwoColumnJoin::asString(size_t indent) const {
+string TwoColumnJoin::asStringImpl(size_t indent) const {
   std::ostringstream os;
   for (size_t i = 0; i < indent; ++i) {
     os << " ";
@@ -75,7 +75,7 @@ string TwoColumnJoin::asString(size_t indent) const {
     os << " ";
   }
   os << "join-columns: [" << _jc1Right << " & " << _jc2Right << "]";
-  return os.str();
+  return std::move(os).str();
 }
 
 // _____________________________________________________________________________
@@ -107,21 +107,21 @@ void TwoColumnJoin::computeResult(ResultTable* result) {
     runtimeInfo.addChild(_left->getRootOperation()->getRuntimeInfo());
     runtimeInfo.addChild(_right->getRootOperation()->getRuntimeInfo());
     const IdTable& filter =
-        rightFilter ? rightResult->_data : leftResult->_data;
+        rightFilter ? rightResult->_idTable : leftResult->_idTable;
     size_t jc1 = rightFilter ? _jc1Left : _jc1Right;
     size_t jc2 = rightFilter ? _jc2Left : _jc2Right;
     result->_sortedBy = {jc1, jc2};
-    result->_data.setCols(toFilter->_data.cols());
-    result->_resultTypes.reserve(result->_data.cols());
+    result->_idTable.setCols(toFilter->_idTable.cols());
+    result->_resultTypes.reserve(result->_idTable.cols());
     result->_resultTypes.insert(result->_resultTypes.end(),
                                 toFilter->_resultTypes.begin(),
                                 toFilter->_resultTypes.end());
-    AD_CHECK_GE(result->_data.cols(), 2);
+    AD_CHECK_GE(result->_idTable.cols(), 2);
 
-    int inWidth = toFilter->_data.cols();
+    int inWidth = toFilter->_idTable.cols();
     int filterWidth = filter.cols();
-    CALL_FIXED_SIZE_2(inWidth, filterWidth, getEngine().filter, toFilter->_data,
-                      jc1, jc2, filter, &result->_data);
+    CALL_FIXED_SIZE_2(inWidth, filterWidth, getEngine().filter,
+                      toFilter->_idTable, jc1, jc2, filter, &result->_idTable);
 
     LOG(DEBUG) << "TwoColumnJoin result computation done." << endl;
     return;

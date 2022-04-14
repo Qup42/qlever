@@ -51,7 +51,7 @@ const std::string VARNAME =
 const std::string GROUP_BY = "(?i)(GROUP(\\s)*BY)";
 const std::string ORDER_BY = "(?i)(ORDER(\\s)*BY)";
 const std::string KEYWORD =
-    "(?i)(TEXTLIMIT|PREFIX|SELECT|DISTINCT|REDUCED|"
+    "(?i)(TEXTLIMIT|PREFIX|SELECT|CONSTRUCT|DISTINCT|REDUCED|"
     "HAVING|WHERE|ASC|AS|LIMIT|OFFSET|DESC|FILTER|VALUES|"
     "OPTIONAL|UNION|LANGMATCHES|LANG|TEXT|SCORE|REGEX|PREFIX|SEPARATOR|STR|"
     "BIND|MINUS)";
@@ -98,6 +98,13 @@ SparqlLexer::SparqlLexer(const std::string& sparql)
   readNext();
 }
 
+// ____________________________________________________________________________
+void SparqlLexer::reset(std::string sparql) {
+  _sparql = std::move(sparql);
+  _re_string = re2::StringPiece{_sparql};
+  readNext();
+}
+
 bool SparqlLexer::empty() const { return _re_string.empty(); }
 
 void SparqlLexer::readNext() {
@@ -123,9 +130,9 @@ void SparqlLexer::readNext() {
           // unescaping of RDFLiteral, only applied to the actual literal and
           // not the datatype/langtag
           auto lastQuote = raw.rfind('"');
-          std::string_view quoted{raw.begin(), raw.begin() + lastQuote + 1};
-          std::string_view langtagOrDatatype{raw.begin() + lastQuote + 1,
-                                             raw.end()};
+          std::string_view quoted{raw.data(), lastQuote + 1};
+          std::string_view langtagOrDatatype{raw.data() + lastQuote + 1,
+                                             raw.size() - (lastQuote + 1)};
           raw = RdfEscaping::normalizeRDFLiteral(quoted) + langtagOrDatatype;
         }
         break;  // we check the regexes in an order that ensures that stopping
@@ -133,7 +140,14 @@ void SparqlLexer::readNext() {
       }
     }
     if (!regexMatched) {
-      throw ParseException("Unexpected input: " + _re_string.as_string());
+      if (_re_string[0] == '#') {
+        // Start of a comment. Consume everything up to the next newline.
+        while (!_re_string.empty() && _re_string[0] != '\n') {
+          _re_string.remove_prefix(1);
+        }
+      } else {
+        throw ParseException("Unexpected input: " + _re_string.as_string());
+      }
     }
   }
   _next.raw = raw;
@@ -145,7 +159,7 @@ void SparqlLexer::expandNextUntilWhitespace() {
     s << *_re_string.begin();
     _re_string.remove_prefix(1);
   }
-  _next.raw += s.str();
+  _next.raw += std::move(s).str();
 }
 
 bool SparqlLexer::accept(SparqlToken::Type type) {
@@ -177,7 +191,7 @@ void SparqlLexer::expect(SparqlToken::Type type) {
       << " but got a token of type " << SparqlToken::TYPE_NAMES[(int)_next.type]
       << " (" << _next.raw << ") in the input at pos " << _next.pos << " : "
       << _sparql.substr(_next.pos, 256);
-    throw ParseException(s.str());
+    throw ParseException(std::move(s).str());
   }
   readNext();
 }
@@ -187,23 +201,24 @@ void SparqlLexer::expect(const std::string& raw, bool match_case) {
     s << "Expected '" << raw << "' but got '" << _next.raw
       << "' in the input at pos " << _next.pos << " : "
       << _sparql.substr(_next.pos, 256);
-    throw ParseException(s.str());
+    throw ParseException(std::move(s).str());
   } else if (!match_case && ad_utility::getLowercaseUtf8(_next.raw) !=
                                 ad_utility::getLowercaseUtf8(raw)) {
     std::ostringstream s;
     s << "Expected '" << raw << "' but got '" << _next.raw
       << "' in the input at pos " << _next.pos << " : "
       << _sparql.substr(_next.pos, 256);
-    throw ParseException(s.str());
+    throw ParseException(std::move(s).str());
   }
   readNext();
 }
+
 void SparqlLexer::expectEmpty() {
   if (!empty()) {
     std::ostringstream s;
     s << "Expected the end of the input but found "
       << _re_string.substr(0, 256);
-    throw ParseException(s.str());
+    throw ParseException(std::move(s).str());
   }
 }
 

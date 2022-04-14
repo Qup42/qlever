@@ -152,7 +152,14 @@ class ConcurrentCache {
   }
 
   /// Clear the cache, including the pinned entries.
-  void clearAll() { _cacheAndInProgressMap.wlock()->_cache.clearAll(); }
+  virtual void clearAll() { _cacheAndInProgressMap.wlock()->_cache.clearAll(); }
+
+  /// Delete elements from the unpinned part of the cache of total size
+  /// at least `size`;
+  bool makeRoomAsMuchAsPossible(size_t size) {
+    return _cacheAndInProgressMap.wlock()->_cache.makeRoomAsMuchAsPossible(
+        size);
+  }
 
   /// The number of non-pinned entries in the cache
   auto numNonPinnedEntries() const {
@@ -190,6 +197,17 @@ class ConcurrentCache {
   // shared_ptr.
   auto resultAt(const Key& k) {
     return _cacheAndInProgressMap.wlock()->_cache[k];
+  }
+
+  // These functions set the different capacity/size settings of the cache
+  void setMaxSize(size_t maxSize) {
+    _cacheAndInProgressMap.wlock()->_cache.setMaxSize(maxSize);
+  }
+  void setMaxNumEntries(size_t maxNumEntries) {
+    _cacheAndInProgressMap.wlock()->_cache.setMaxNumEntries(maxNumEntries);
+  }
+  void setMaxSizeSingleEntry(size_t maxSize) {
+    _cacheAndInProgressMap.wlock()->_cache.setMaxSizeSingleEntry(maxSize);
   }
 
  private:

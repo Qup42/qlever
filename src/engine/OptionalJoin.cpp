@@ -14,7 +14,8 @@ OptionalJoin::OptionalJoin(QueryExecutionContext* qec,
                            std::shared_ptr<QueryExecutionTree> t1,
                            bool t1Optional,
                            std::shared_ptr<QueryExecutionTree> t2,
-                           bool t2Optional, const vector<array<Id, 2>>& jcs)
+                           bool t2Optional,
+                           const vector<array<ColumnIndex, 2>>& jcs)
     : Operation(qec), _joinColumns(jcs), _multiplicitiesComputed(false) {
   // Make sure subtrees are ordered so that identical queries can be identified.
   AD_CHECK_GT(jcs.size(), 0);
@@ -35,7 +36,7 @@ OptionalJoin::OptionalJoin(QueryExecutionContext* qec,
 }
 
 // _____________________________________________________________________________
-string OptionalJoin::asString(size_t indent) const {
+string OptionalJoin::asStringImpl(size_t indent) const {
   std::ostringstream os;
   for (size_t i = 0; i < indent; ++i) {
     os << " ";
@@ -55,7 +56,7 @@ string OptionalJoin::asString(size_t indent) const {
     os << _joinColumns[i][1] << (i < _joinColumns.size() - 1 ? " & " : "");
   };
   os << "]";
-  return os.str();
+  return std::move(os).str();
 }
 
 // _____________________________________________________________________________
@@ -81,9 +82,9 @@ void OptionalJoin::computeResult(ResultTable* result) {
   RuntimeInformation& runtimeInfo = getRuntimeInfo();
 
   result->_sortedBy = resultSortedOn();
-  result->_data.setCols(getResultWidth());
+  result->_idTable.setCols(getResultWidth());
 
-  AD_CHECK_GE(result->_data.cols(), _joinColumns.size());
+  AD_CHECK_GE(result->_idTable.cols(), _joinColumns.size());
 
   const auto leftResult = _left->getResult();
   const auto rightResult = _right->getResult();
@@ -93,13 +94,13 @@ void OptionalJoin::computeResult(ResultTable* result) {
   LOG(DEBUG) << "OptionalJoin subresult computation done." << std::endl;
 
   // compute the result types
-  result->_resultTypes.reserve(result->_data.cols());
+  result->_resultTypes.reserve(result->_idTable.cols());
   result->_resultTypes.insert(result->_resultTypes.end(),
                               leftResult->_resultTypes.begin(),
                               leftResult->_resultTypes.end());
-  for (size_t col = 0; col < rightResult->_data.cols(); col++) {
+  for (size_t col = 0; col < rightResult->_idTable.cols(); col++) {
     bool isJoinColumn = false;
-    for (const std::array<Id, 2>& a : _joinColumns) {
+    for (const std::array<ColumnIndex, 2>& a : _joinColumns) {
       if (a[1] == col) {
         isJoinColumn = true;
         break;
@@ -115,12 +116,12 @@ void OptionalJoin::computeResult(ResultTable* result) {
   LOG(DEBUG) << "Left side optional: " << _leftOptional
              << " right side optional: " << _rightOptional << endl;
 
-  int leftWidth = leftResult->_data.cols();
-  int rightWidth = rightResult->_data.cols();
-  int resWidth = result->_data.cols();
+  int leftWidth = leftResult->_idTable.cols();
+  int rightWidth = rightResult->_idTable.cols();
+  int resWidth = result->_idTable.cols();
   CALL_FIXED_SIZE_3(leftWidth, rightWidth, resWidth, optionalJoin,
-                    leftResult->_data, rightResult->_data, _leftOptional,
-                    _rightOptional, _joinColumns, &result->_data);
+                    leftResult->_idTable, rightResult->_idTable, _leftOptional,
+                    _rightOptional, _joinColumns, &result->_idTable);
   LOG(DEBUG) << "OptionalJoin result computation done." << endl;
 }
 
@@ -134,7 +135,7 @@ ad_utility::HashMap<string, size_t> OptionalJoin::getVariableColumns() const {
     bool isJoinColumn = false;
     // Reduce the index for every column of _right that is beeing joined on,
     // and the index of which is smaller than the index of it.
-    for (const std::array<Id, 2>& a : _joinColumns) {
+    for (const std::array<ColumnIndex, 2>& a : _joinColumns) {
       if (a[1] < it->second) {
         columnIndex--;
       } else if (a[1] == it->second) {
@@ -161,8 +162,9 @@ size_t OptionalJoin::getResultWidth() const {
 vector<size_t> OptionalJoin::resultSortedOn() const {
   std::vector<size_t> sortedOn;
   // The result is sorted on all join columns from the left subtree.
-  for (const auto& a : _joinColumns) {
-    sortedOn.push_back(a[0]);
+  for (const auto& [joinColumnLeft, joinColumnRight] : _joinColumns) {
+    (void)joinColumnRight;
+    sortedOn.push_back(joinColumnLeft);
   }
   return sortedOn;
 }
@@ -228,7 +230,8 @@ void OptionalJoin::computeSizeEstimateAndMultiplicities() {
   float multRight = std::numeric_limits<float>::max();
   for (size_t i = 0; i < _joinColumns.size(); i++) {
     multLeft = std::min(multLeft, _left->getMultiplicity(_joinColumns[i][0]));
-    multRight = std::min(multLeft, _left->getMultiplicity(_joinColumns[i][1]));
+    multRight =
+        std::min(multRight, _right->getMultiplicity(_joinColumns[i][1]));
   }
   float multResult = multLeft * multRight;
 
@@ -277,7 +280,8 @@ void OptionalJoin::createOptionalResult(
     const IdTableView<A_WIDTH>& a, size_t aIdx, bool aEmpty,
     const IdTableView<B_WIDTH>& b, size_t bIdx, bool bEmpty,
     int joinColumnBitmap_a, int joinColumnBitmap_b,
-    const std::vector<Id>& joinColumnAToB, IdTableStatic<OUT_WIDTH>* res) {
+    const std::vector<ColumnIndex>& joinColumnAToB,
+    IdTableStatic<OUT_WIDTH>* res) {
   assert(!(aEmpty && bEmpty));
   res->emplace_back();
   size_t rIdx = res->size() - 1;
@@ -325,10 +329,9 @@ void OptionalJoin::createOptionalResult(
 }
 
 template <int A_WIDTH, int B_WIDTH, int OUT_WIDTH>
-void OptionalJoin::optionalJoin(const IdTable& dynA, const IdTable& dynB,
-                                bool aOptional, bool bOptional,
-                                const vector<array<Id, 2>>& joinColumns,
-                                IdTable* dynResult) {
+void OptionalJoin::optionalJoin(
+    const IdTable& dynA, const IdTable& dynB, bool aOptional, bool bOptional,
+    const vector<array<ColumnIndex, 2>>& joinColumns, IdTable* dynResult) {
   // check for trivial cases
   if ((dynA.size() == 0 && dynB.size() == 0) ||
       (dynA.size() == 0 && !aOptional) || (dynB.size() == 0 && !bOptional)) {
@@ -339,41 +342,43 @@ void OptionalJoin::optionalJoin(const IdTable& dynA, const IdTable& dynB,
   const IdTableView<B_WIDTH> b = dynB.asStaticView<B_WIDTH>();
   IdTableStatic<OUT_WIDTH> result = dynResult->moveToStatic<OUT_WIDTH>();
 
-  int joinColumnBitmap_a = 0;
-  int joinColumnBitmap_b = 0;
-  for (const array<Id, 2>& jc : joinColumns) {
-    joinColumnBitmap_a |= (1 << jc[0]);
-    joinColumnBitmap_b |= (1 << jc[1]);
+  int joinColumnBitmapLeft = 0;
+  int joinColumnBitmapRight = 0;
+  for (const auto& [joinColumnLeft, joinColumnRight] : joinColumns) {
+    joinColumnBitmapLeft |= (1 << joinColumnLeft);
+    joinColumnBitmapRight |= (1 << joinColumnRight);
   }
 
   // When a is optional this is used to quickly determine
   // in which column of b the value of a joined column can be found.
-  std::vector<Id> joinColumnAToB;
+  std::vector<ColumnIndex> joinColumnLeftToRight;
   if (aOptional) {
-    uint32_t maxJoinColA = 0;
-    for (const array<Id, 2>& jc : joinColumns) {
-      if (jc[0] > maxJoinColA) {
-        maxJoinColA = jc[0];
+    uint32_t maxJoinColLeft = 0;
+    for (const auto& [joinColumnLeft, joinColumnRight] : joinColumns) {
+      if (joinColumnLeft > maxJoinColLeft) {
+        maxJoinColLeft = joinColumnLeft;
       }
     }
-    joinColumnAToB.resize(maxJoinColA + 1);
-    for (const array<Id, 2>& jc : joinColumns) {
-      joinColumnAToB[jc[0]] = jc[1];
+    joinColumnLeftToRight.resize(maxJoinColLeft + 1);
+    for (const auto& [joinColumnLeft, joinColumnRight] : joinColumns) {
+      joinColumnLeftToRight[joinColumnLeft] = joinColumnRight;
     }
   }
 
   // Deal with one of the two tables beeing both empty and optional
   if (a.size() == 0 && aOptional) {
     for (size_t ib = 0; ib < b.size(); ib++) {
-      createOptionalResult(a, 0, true, b, ib, false, joinColumnBitmap_a,
-                           joinColumnBitmap_b, joinColumnAToB, &result);
+      createOptionalResult(a, 0, true, b, ib, false, joinColumnBitmapLeft,
+                           joinColumnBitmapRight, joinColumnLeftToRight,
+                           &result);
     }
     *dynResult = result.moveToDynamic();
     return;
   } else if (b.size() == 0 && bOptional) {
     for (size_t ia = 0; ia < a.size(); ia++) {
-      createOptionalResult(a, ia, false, b, 0, true, joinColumnBitmap_a,
-                           joinColumnBitmap_b, joinColumnAToB, &result);
+      createOptionalResult(a, ia, false, b, 0, true, joinColumnBitmapLeft,
+                           joinColumnBitmapRight, joinColumnLeftToRight,
+                           &result);
     }
     *dynResult = result.moveToDynamic();
     return;
@@ -385,8 +390,9 @@ void OptionalJoin::optionalJoin(const IdTable& dynA, const IdTable& dynB,
     // Join columns 0 are the primary sort columns
     while (a(ia, joinColumns[0][0]) < b(ib, joinColumns[0][1])) {
       if (bOptional) {
-        createOptionalResult(a, ia, false, b, ib, true, joinColumnBitmap_a,
-                             joinColumnBitmap_b, joinColumnAToB, &result);
+        createOptionalResult(a, ia, false, b, ib, true, joinColumnBitmapLeft,
+                             joinColumnBitmapRight, joinColumnLeftToRight,
+                             &result);
       }
       ia++;
       if (ia >= a.size()) {
@@ -395,8 +401,9 @@ void OptionalJoin::optionalJoin(const IdTable& dynA, const IdTable& dynB,
     }
     while (b[ib][joinColumns[0][1]] < a[ia][joinColumns[0][0]]) {
       if (aOptional) {
-        createOptionalResult(a, ia, true, b, ib, false, joinColumnBitmap_a,
-                             joinColumnBitmap_b, joinColumnAToB, &result);
+        createOptionalResult(a, ia, true, b, ib, false, joinColumnBitmapLeft,
+                             joinColumnBitmapRight, joinColumnLeftToRight,
+                             &result);
       }
       ib++;
       if (ib >= b.size()) {
@@ -408,11 +415,12 @@ void OptionalJoin::optionalJoin(const IdTable& dynA, const IdTable& dynB,
     matched = true;
     for (size_t joinColIndex = 0; joinColIndex < joinColumns.size();
          joinColIndex++) {
-      const array<Id, 2>& joinColumn = joinColumns[joinColIndex];
+      const auto& joinColumn = joinColumns[joinColIndex];
       if (a[ia][joinColumn[0]] < b[ib][joinColumn[1]]) {
         if (bOptional) {
-          createOptionalResult(a, ia, false, b, ib, true, joinColumnBitmap_a,
-                               joinColumnBitmap_b, joinColumnAToB, &result);
+          createOptionalResult(a, ia, false, b, ib, true, joinColumnBitmapLeft,
+                               joinColumnBitmapRight, joinColumnLeftToRight,
+                               &result);
         }
         ia++;
         matched = false;
@@ -420,8 +428,9 @@ void OptionalJoin::optionalJoin(const IdTable& dynA, const IdTable& dynB,
       }
       if (b[ib][joinColumn[1]] < a[ia][joinColumn[0]]) {
         if (aOptional) {
-          createOptionalResult(a, ia, true, b, ib, false, joinColumnBitmap_a,
-                               joinColumnBitmap_b, joinColumnAToB, &result);
+          createOptionalResult(a, ia, true, b, ib, false, joinColumnBitmapLeft,
+                               joinColumnBitmapRight, joinColumnLeftToRight,
+                               &result);
         }
         ib++;
         matched = false;
@@ -436,14 +445,16 @@ void OptionalJoin::optionalJoin(const IdTable& dynA, const IdTable& dynB,
       size_t initIb = ib;
 
       while (matched) {
-        createOptionalResult(a, ia, false, b, ib, false, joinColumnBitmap_a,
-                             joinColumnBitmap_b, joinColumnAToB, &result);
+        createOptionalResult(a, ia, false, b, ib, false, joinColumnBitmapLeft,
+                             joinColumnBitmapRight, joinColumnLeftToRight,
+                             &result);
 
         ib++;
 
         // do the rows still match?
-        for (const array<Id, 2>& jc : joinColumns) {
-          if (ib >= b.size() || a[ia][jc[0]] != b[ib][jc[1]]) {
+        for (const auto& [joinColumnLeft, joinColumnRight] : joinColumns) {
+          if (ib >= b.size() ||
+              a[ia][joinColumnLeft] != b[ib][joinColumnRight]) {
             matched = false;
             break;
           }
@@ -452,8 +463,9 @@ void OptionalJoin::optionalJoin(const IdTable& dynA, const IdTable& dynB,
       ia++;
       // Check if the next row in a also matches the initial row in b
       matched = true;
-      for (const array<Id, 2>& jc : joinColumns) {
-        if (ia >= a.size() || a[ia][jc[0]] != b[initIb][jc[1]]) {
+      for (const auto& [joinColumnLeft, joinColumnRight] : joinColumns) {
+        if (ia >= a.size() ||
+            a[ia][joinColumnLeft] != b[initIb][joinColumnRight]) {
           matched = false;
           break;
         }
@@ -470,16 +482,18 @@ finish:
   // of the other table.
   if (aOptional && ib < b.size()) {
     while (ib < b.size()) {
-      createOptionalResult(a, ia, true, b, ib, false, joinColumnBitmap_a,
-                           joinColumnBitmap_b, joinColumnAToB, &result);
+      createOptionalResult(a, ia, true, b, ib, false, joinColumnBitmapLeft,
+                           joinColumnBitmapRight, joinColumnLeftToRight,
+                           &result);
 
       ++ib;
     }
   }
   if (bOptional && ia < a.size()) {
     while (ia < a.size()) {
-      createOptionalResult(a, ia, false, b, ib, true, joinColumnBitmap_a,
-                           joinColumnBitmap_b, joinColumnAToB, &result);
+      createOptionalResult(a, ia, false, b, ib, true, joinColumnBitmapLeft,
+                           joinColumnBitmapRight, joinColumnLeftToRight,
+                           &result);
       ++ia;
     }
   }

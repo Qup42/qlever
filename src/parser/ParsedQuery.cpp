@@ -4,16 +4,16 @@
 
 #include "ParsedQuery.h"
 
+#include <absl/strings/str_split.h>
+
 #include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "../util/Conversions.h"
-#include "../util/StringUtils.h"
 #include "./RdfEscaping.h"
-#include "ParseException.h"
-#include "Tokenizer.h"
+#include "absl/strings/str_join.h"
 
 using std::string;
 using std::vector;
@@ -32,41 +32,65 @@ string ParsedQuery::asString() const {
   }
   os << "\n}";
 
-  // SELECT
-  os << "\nSELECT: {\n\t";
-  for (size_t i = 0; i < _selectClause._selectedVariables.size(); ++i) {
-    os << _selectClause._selectedVariables[i];
-    if (i + 1 < _selectClause._selectedVariables.size()) {
-      os << ", ";
-    }
-  }
-  os << "\n}";
+  bool usesSelect = hasSelectClause();
+  bool usesAsterisk =
+      usesSelect && selectClause()._varsOrAsterisk.isAllVariablesSelected();
 
-  // ALIASES
-  os << "\nALIASES: {\n\t";
-  for (size_t i = 0; i < _selectClause._aliases.size(); ++i) {
-    const Alias& a = _selectClause._aliases[i];
-    os << a._function;
-    if (i + 1 < _selectClause._aliases.size()) {
-      os << "\n\t";
+  if (usesSelect) {
+    const auto& selectClause = this->selectClause();
+    // SELECT
+    os << "\nSELECT: {\n\t";
+    os << absl::StrJoin(selectClause._varsOrAsterisk.getSelectedVariables(),
+                        ", ");
+    os << "\n}";
+
+    // ALIASES
+    os << "\nALIASES: {\n\t";
+    if (!usesAsterisk) {
+      for (size_t i = 0; i < selectClause._aliases.size(); ++i) {
+        const Alias& alias = selectClause._aliases[i];
+        os << alias._expression.getDescriptor();
+        if (i + 1 < selectClause._aliases.size()) {
+          os << "\n\t";
+        }
+      }
+      os << "{";
     }
+  } else if (hasConstructClause()) {
+    const auto& constructClause = this->constructClause();
+    os << "\n CONSTRUCT {\n\t";
+    for (const auto& triple : constructClause) {
+      os << triple[0].toSparql();
+      os << ' ';
+      os << triple[1].toSparql();
+      os << ' ';
+      os << triple[2].toSparql();
+      os << " .\n";
+    }
+    os << "}";
   }
-  os << "{";
 
   // WHERE
   os << "\nWHERE: \n";
   _rootGraphPattern.toString(os, 1);
 
-  os << "\nLIMIT: " << (_limit.size() > 0 ? _limit : "no limit specified");
+  os << "\nLIMIT: "
+     << (_limit.has_value() ? std::to_string(_limit.value())
+                            : "no limit specified");
   os << "\nTEXTLIMIT: "
-     << (_textLimit.size() > 0 ? _textLimit : "no limit specified");
-  os << "\nOFFSET: " << (_offset.size() > 0 ? _offset : "no offset specified");
-  os << "\nDISTINCT modifier is " << (_selectClause._distinct ? "" : "not ")
-     << "present.";
-  os << "\nREDUCED modifier is " << (_selectClause._reduced ? "" : "not ")
-     << "present.";
+     << (!_textLimit.empty() ? _textLimit : "no limit specified");
+  os << "\nOFFSET: "
+     << (_offset.has_value() ? std::to_string(_offset.value())
+                             : "no offset specified");
+  if (usesSelect) {
+    const auto& selectClause = this->selectClause();
+    os << "\nDISTINCT modifier is " << (selectClause._distinct ? "" : "not ")
+       << "present.";
+    os << "\nREDUCED modifier is " << (selectClause._reduced ? "" : "not ")
+       << "present.";
+  }
   os << "\nORDER BY: ";
-  if (_orderBy.size() == 0) {
+  if (_orderBy.empty()) {
     os << "not specified";
   } else {
     for (auto& key : _orderBy) {
@@ -74,22 +98,22 @@ string ParsedQuery::asString() const {
     }
   }
   os << "\n";
-  return os.str();
+  return std::move(os).str();
 }
 
 // _____________________________________________________________________________
 string SparqlPrefix::asString() const {
   std::ostringstream os;
   os << "{" << _prefix << ": " << _uri << "}";
-  return os.str();
+  return std::move(os).str();
 }
 
 // _____________________________________________________________________________
-PropertyPath::PropertyPath(Operation op, uint16_t limit, const std::string& iri,
+PropertyPath::PropertyPath(Operation op, uint16_t limit, std::string iri,
                            std::initializer_list<PropertyPath> children)
     : _operation(op),
       _limit(limit),
-      _iri(iri),
+      _iri(std::move(iri)),
       _children(children),
       _can_be_null(false) {}
 
@@ -98,7 +122,7 @@ void PropertyPath::writeToStream(std::ostream& out) const {
   switch (_operation) {
     case Operation::ALTERNATIVE:
       out << "(";
-      if (_children.size() > 0) {
+      if (!_children.empty()) {
         _children[0].writeToStream(out);
       } else {
         out << "missing" << std::endl;
@@ -113,7 +137,7 @@ void PropertyPath::writeToStream(std::ostream& out) const {
       break;
     case Operation::INVERSE:
       out << "^(";
-      if (_children.size() > 0) {
+      if (!_children.empty()) {
         _children[0].writeToStream(out);
       } else {
         out << "missing" << std::endl;
@@ -125,7 +149,7 @@ void PropertyPath::writeToStream(std::ostream& out) const {
       break;
     case Operation::SEQUENCE:
       out << "(";
-      if (_children.size() > 0) {
+      if (!_children.empty()) {
         _children[0].writeToStream(out);
       } else {
         out << "missing" << std::endl;
@@ -140,7 +164,7 @@ void PropertyPath::writeToStream(std::ostream& out) const {
       break;
     case Operation::TRANSITIVE:
       out << "(";
-      if (_children.size() > 0) {
+      if (!_children.empty()) {
         _children[0].writeToStream(out);
       } else {
         out << "missing" << std::endl;
@@ -149,7 +173,7 @@ void PropertyPath::writeToStream(std::ostream& out) const {
       break;
     case Operation::TRANSITIVE_MAX:
       out << "(";
-      if (_children.size() > 0) {
+      if (!_children.empty()) {
         _children[0].writeToStream(out);
       } else {
         out << "missing" << std::endl;
@@ -163,7 +187,7 @@ void PropertyPath::writeToStream(std::ostream& out) const {
       break;
     case Operation::TRANSITIVE_MIN:
       out << "(";
-      if (_children.size() > 0) {
+      if (!_children.empty()) {
         _children[0].writeToStream(out);
       } else {
         out << "missing" << std::endl;
@@ -177,12 +201,12 @@ void PropertyPath::writeToStream(std::ostream& out) const {
 std::string PropertyPath::asString() const {
   std::stringstream s;
   writeToStream(s);
-  return s.str();
+  return std::move(s).str();
 }
 
 // _____________________________________________________________________________
 void PropertyPath::computeCanBeNull() {
-  _can_be_null = _children.size() > 0;
+  _can_be_null = !_children.empty();
   for (PropertyPath& p : _children) {
     p.computeCanBeNull();
     _can_be_null &= p._can_be_null;
@@ -204,7 +228,7 @@ std::ostream& operator<<(std::ostream& out, const PropertyPath& p) {
 string SparqlTriple::asString() const {
   std::ostringstream os;
   os << "{s: " << _s << ", p: " << _p << ", o: " << _o << "}";
-  return os.str();
+  return std::move(os).str();
 }
 
 // _____________________________________________________________________________
@@ -244,7 +268,7 @@ string SparqlFilter::asString() const {
       break;
   }
   os << _rhs << ")";
-  return os.str();
+  return std::move(os).str();
 }
 
 // _____________________________________________________________________________
@@ -300,8 +324,7 @@ void ParsedQuery::expandPrefixes() {
           }
 
         } else if constexpr (std::is_same_v<T, GraphPatternOperation::Bind>) {
-          for (auto ptr : std::visit([](auto&& x) { return x.strings(); },
-                                     arg._expressionVariant)) {
+          for (auto ptr : arg.strings()) {
             expandPrefix(*ptr, prefixMap);
           }
         } else {
@@ -312,7 +335,7 @@ void ParsedQuery::expandPrefixes() {
             expandPrefix(trip._p, prefixMap);
             if (trip._p._operation == PropertyPath::Operation::IRI &&
                 trip._p._iri.find("in-context") != string::npos) {
-              auto tokens = ad_utility::split(trip._o, ' ');
+              std::vector<std::string> tokens = absl::StrSplit(trip._o, ' ');
               trip._o = "";
               for (size_t i = 0; i < tokens.size(); ++i) {
                 expandPrefix(tokens[i], prefixMap);
@@ -353,11 +376,10 @@ void ParsedQuery::expandPrefix(
 // _____________________________________________________________________________
 void ParsedQuery::expandPrefix(
     string& item, const ad_utility::HashMap<string, string>& prefixMap) {
-  if (!ad_utility::startsWith(item, "?") &&
-      !ad_utility::startsWith(item, "<")) {
+  if (!item.starts_with("?") && !item.starts_with("<")) {
     std::optional<string> langtag = std::nullopt;
-    if (ad_utility::startsWith(item, "@")) {
-      auto secondPos = item.find("@", 1);
+    if (item.starts_with("@")) {
+      auto secondPos = item.find('@', 1);
       if (secondPos == string::npos) {
         throw ParseException(
             "langtaged predicates must have form @lang@ActualPredicate. Second "
@@ -388,112 +410,6 @@ void ParsedQuery::expandPrefix(
           ad_utility::convertToLanguageTaggedPredicate(item, langtag.value());
     }
   }
-}
-
-void ParsedQuery::parseAliases() {
-  for (size_t i = 0; i < _selectClause._selectedVariables.size(); i++) {
-    const std::string& var = _selectClause._selectedVariables[i];
-    if (var[0] == '(') {
-      // remove the leading and trailing bracket
-      std::string inner = var.substr(1, var.size() - 2);
-      // Replace the variable in the selected variables array with the aliased
-      // name.
-      _selectClause._selectedVariables[i] = parseAlias(inner);
-    }
-  }
-  for (size_t i = 0; i < _orderBy.size(); i++) {
-    OrderKey& key = _orderBy[i];
-    if (key._key[0] == '(') {
-      // remove the leading and trailing bracket
-      std::string inner = key._key.substr(1, key._key.size() - 2);
-      // Preserve the descending or ascending order but change the key name.
-      key._key = parseAlias(inner);
-    }
-  }
-}
-
-// _____________________________________________________________________________
-std::string ParsedQuery::parseAlias(const std::string& alias) {
-  std::string newVarName = "";
-  std::string lowerInner = ad_utility::getLowercaseUtf8(alias);
-  if (ad_utility::startsWith(lowerInner, "count") ||
-      ad_utility::startsWith(lowerInner, "group_concat") ||
-      ad_utility::startsWith(lowerInner, "first") ||
-      ad_utility::startsWith(lowerInner, "last") ||
-      ad_utility::startsWith(lowerInner, "sample") ||
-      ad_utility::startsWith(lowerInner, "min") ||
-      ad_utility::startsWith(lowerInner, "max") ||
-      ad_utility::startsWith(lowerInner, "sum") ||
-      ad_utility::startsWith(lowerInner, "avg")) {
-    Alias a;
-    a._isAggregate = true;
-    size_t pos = lowerInner.find(" as ");
-    if (pos == std::string::npos) {
-      throw ParseException("Alias (" + alias +
-                           ") is malformed: keyword 'as' is missing or not "
-                           "surrounded by spaces.");
-    }
-    // skip the leading space of the 'as'
-    pos++;
-    newVarName = alias.substr(pos + 2);
-    newVarName = ad_utility::strip(newVarName, " \t\n");
-    a._outVarName = newVarName;
-    a._function = alias;
-
-    // find the second opening bracket
-    pos = alias.find('(', 1);
-    pos++;
-    while (pos < alias.size() &&
-           ::std::isspace(static_cast<unsigned char>(alias[pos]))) {
-      pos++;
-    }
-    if (lowerInner.compare(pos, 8, "distinct") == 0) {
-      // skip the distinct and any space after it
-      pos += 8;
-      while (pos < alias.size() &&
-             ::std::isspace(static_cast<unsigned char>(alias[pos]))) {
-        pos++;
-      }
-    }
-    size_t start = pos;
-    while (pos < alias.size() &&
-           !::std::isspace(static_cast<unsigned char>(alias[pos]))) {
-      pos++;
-    }
-    if (pos == start || pos >= alias.size()) {
-      throw ParseException(
-          "Alias (" + alias +
-          ") is malformed: no input variable given (e.g. COUNT(?a))");
-    }
-
-    a._inVarName = alias.substr(start, pos - start - 1);
-    bool isUnique = true;
-    // check if another alias for the output variable already exists:
-    for (const Alias& other : _selectClause._aliases) {
-      if (other._outVarName == a._outVarName) {
-        // Check if the aliases are equal, otherwise throw an exception
-        if (other._isAggregate != a._isAggregate ||
-            other._function != a._function) {
-          // TODO(florian): For a proper comparison the alias would need to have
-          // been parsed fully already. As the alias is still stored as a string
-          // at this point the comparison of two aliases is also string based.
-          throw ParseException(
-              "Two aliases try to bind values to the variable " +
-              a._outVarName);
-        } else {
-          isUnique = false;
-          break;
-        }
-      }
-    }
-    if (isUnique) {
-      // only add the alias if it doesn't already exist
-      _selectClause._aliases.push_back(a);
-    }
-  } else {
-    throw ParseException("Unknown or malformed alias: (" + alias + ")");
-  }
-  return newVarName;
 }
 
 void ParsedQuery::merge(const ParsedQuery& p) {

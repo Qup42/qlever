@@ -15,7 +15,7 @@ Values::Values(QueryExecutionContext* qec, SparqlValues values)
   _values = sanitizeValues(std::move(values));
 }
 
-string Values::asString(size_t indent) const {
+string Values::asStringImpl(size_t indent) const {
   std::ostringstream os;
   for (size_t i = 0; i < indent; ++i) {
     os << " ";
@@ -43,7 +43,7 @@ string Values::asString(size_t indent) const {
     }
   }
   os << "}";
-  return os.str();
+  return std::move(os).str();
 }
 
 string Values::getDescriptor() const {
@@ -70,7 +70,7 @@ string Values::getDescriptor() const {
       os << " ";
     }
   }
-  return os.str();
+  return std::move(os).str();
 }
 
 size_t Values::getResultWidth() const { return _values._variables.size(); }
@@ -128,12 +128,12 @@ void Values::computeResult(ResultTable* result) {
   const Index& index = getIndex();
 
   result->_sortedBy = resultSortedOn();
-  result->_data.setCols(getResultWidth());
+  result->_idTable.setCols(getResultWidth());
   result->_resultTypes.resize(_values._variables.size(),
                               ResultTable::ResultType::KB);
 
   size_t resWidth = getResultWidth();
-  CALL_FIXED_SIZE_1(resWidth, writeValues, &result->_data, index, _values);
+  CALL_FIXED_SIZE_1(resWidth, writeValues, &result->_idTable, index, _values);
 }
 
 SparqlValues Values::sanitizeValues(SparqlValues&& values) {
@@ -194,8 +194,8 @@ void Values::writeValues(IdTable* res, const Index& index,
   size_t numSkipped = 0;
   for (const auto& row : values._values) {
     for (size_t colIdx = 0; colIdx < result.cols(); colIdx++) {
-      size_t id;
-      if (!index.getVocab().getId(row[colIdx], &id)) {
+      Id id;
+      if (!index.getId(row[colIdx], &id)) {
         getWarnings().push_back("The word " + row[colIdx] +
                                 " is not part of the vocabulary.");
         numSkipped++;

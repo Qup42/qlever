@@ -16,9 +16,9 @@ namespace Permutation {
 using std::array;
 using std::string;
 
-// helper class to store static properties of the different permutations
-// to avoid code duplication
-// The template Parameter is a STXXL search functor
+// Helper class to store static properties of the different permutations to
+// avoid code duplication. The first template parameter is a search functor for
+// STXXL.
 template <class Comparator, class MetaDataT>
 class PermutationImpl {
  public:
@@ -48,6 +48,25 @@ class PermutationImpl {
     _meta.readFromFile(&_file);
     LOG(INFO) << "Registered " << _readableName
               << " permutation: " << _meta.statistics() << std::endl;
+    _isLoaded = true;
+  }
+
+  /// For a given ID for the first column, retrieve all IDs of the second and
+  /// third column, and store them in `result`. This is just a thin wrapper
+  /// around `CompressedRelationMetaData::scan`.
+  template <typename IdTableImpl>
+  void scan(Id col0Id, IdTableImpl* result,
+            ad_utility::SharedConcurrentTimeoutTimer timer = nullptr) const {
+    return CompressedRelationMetaData::scan(col0Id, result, *this, timer);
+  }
+  /// For given IDs for the first and second column, retrieve all IDs of the
+  /// third column, and store them in `result`. This is just a thin wrapper
+  /// around `CompressedRelationMetaData::scan`.
+  template <typename IdTableImpl>
+  void scan(Id col0Id, Id col1Id, IdTableImpl* result,
+            ad_utility::SharedConcurrentTimeoutTimer timer = nullptr) const {
+    return CompressedRelationMetaData::scan(col0Id, col1Id, result, *this,
+                                            timer);
   }
 
   // _______________________________________________________
@@ -68,6 +87,8 @@ class PermutationImpl {
   MetaData _meta;
 
   mutable ad_utility::File _file;
+
+  bool _isLoaded = false;
 };
 
 // Type aliases for the 6 permutations used by QLever
