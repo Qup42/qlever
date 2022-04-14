@@ -985,7 +985,6 @@ LangtagAndTriple Index::tripleToInternalRepresentation(TurtleTriple&& triple) {
     // `objectShouldBeExternalizedForUniprot` above.
     if (_onDiskLiterals && (_vocab.shouldBeExternalized(spo[k]) ||
                             (k == 2 && objectShouldBeExternalizedForUniprot))) {
-        _vocab.shouldBeExternalized(component._iriOrLiteral)) {
       component._isExternal = true;
     }
   }
