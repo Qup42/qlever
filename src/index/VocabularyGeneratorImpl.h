@@ -102,7 +102,6 @@ VocabularyMerger::VocMergeRes VocabularyMerger::mergeVocabulary(
       if (writeFuture.valid()) {
         writeFuture.get();
       }
-      LOG(TIMING) << "Next batch is ready" << std::endl;
       writeFuture = std::async(writeTask);
       // we have moved away our buffer, start over
     }
@@ -168,7 +167,6 @@ void VocabularyMerger::writeQueueWordsToIdVec(
                  << '\n';
       } else {
         // we have to strip the externalization character again
-
         auto& c = _lastWritten[0];
         // Keep a copy of the first character to later restore it.
         auto originalFirstChar = c;
