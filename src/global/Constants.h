@@ -5,6 +5,7 @@
 
 #include <stdexcept>
 #include <string>
+
 #include "../util/Parameters.h"
 
 // UNIPROT HACK (Hannah 15.04.2021): For the UniProt build, use more memory for
