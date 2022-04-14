@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <string>
 
+// UNIPROT HACK (Hannah 15.04.2021): For the UniProt build, use more memory for
+// sorting to avoid three passes over the data (should be configurable anyway).
 static const size_t STXXL_MEMORY_TO_USE = 1024L * 1024L * 1024L * 60L;
 static const size_t STXXL_DISK_SIZE_INDEX_BUILDER = 1000 * 1000;
 static const size_t STXXL_DISK_SIZE_INDEX_TEST = 10;
