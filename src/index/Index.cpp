@@ -955,7 +955,6 @@ LangtagAndTriple Index::tripleToInternalRepresentation(TurtleTriple&& triple) {
     auto& iriOrLiteral = std::get<TripleComponent>(el)._iriOrLiteral;
     iriOrLiteral = _vocab.getLocaleManager().normalizeUtf8(iriOrLiteral);
   }
-
   size_t upperBound = 3;
   auto& object = std::get<TripleComponent>(resultTriple[2])._iriOrLiteral;
   // TODO<joka921> Actually create numeric Ids here...
