@@ -189,17 +189,8 @@ ContextListMetaData& ContextListMetaData::createFromByteBuffer(
 
 // _____________________________________________________________________________
 string TextMetaData::statistics() const {
-  std::ostringstream os;
-  std::locale loc;
-  ad_utility::ReadableNumberFacet facet(1);
-  std::locale locWithNumberGrouping(loc, &facet);
-  os.imbue(locWithNumberGrouping);
-  os << '\n';
-  os << "-------------------------------------------------------------------\n";
-  os << "----------------------------------\n";
-  os << "Text Index Statistics:\n";
-  os << "----------------------------------\n\n";
-  os << "# Blocks: " << _blocks.size() << '\n';
+  // TODO: Not sure which of these we still want and why they are computed here
+  // (each time the statistics is shown) and not when the index build is done.
   size_t totalElementsClassicLists = 0;
   size_t totalElementsEntityLists = 0;
   size_t totalBytesClassicLists = 0;
@@ -224,6 +215,26 @@ string TextMetaData::statistics() const {
     totalBytesSls += 1 + wcl._lastByte - wcl._startScorelist;
     totalBytesSls += 1 + ecl._lastByte - ecl._startScorelist;
   }
+  // Show abbreviated statistics (like for the permutations, which used to have
+  // very verbose statistics, too).
+  std::ostringstream os;
+  std::locale loc;
+  ad_utility::ReadableNumberFacet facet(1);
+  std::locale locWithNumberGrouping(loc, &facet);
+  os.imbue(locWithNumberGrouping);
+  os << "#records = " << _nofEntityContexts
+     << ", #words = " << totalElementsClassicLists
+     << ", #entities = " << _nofEntities << ", #blocks = " << _blocks.size();
+  return std::move(os).str();
+
+  // Old verbose statistics.
+  /*
+  os << '\n';
+  os << "-------------------------------------------------------------------\n";
+  os << "----------------------------------\n";
+  os << "Text Index Statistics:\n";
+  os << "----------------------------------\n\n";
+  os << "# Blocks: " << _blocks.size() << '\n';
   os << "-------------------------------------------------------------------\n";
   os << "# Elements: " << totalElementsClassicLists + totalElementsEntityLists
      << '\n';
@@ -254,6 +265,7 @@ string TextMetaData::statistics() const {
      << '\n';
   os << "-------------------------------------------------------------------\n";
   return std::move(os).str();
+  */
 }
 
 // _____________________________________________________________________________
