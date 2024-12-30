@@ -39,11 +39,12 @@ struct ParserAndVisitor {
   SparqlAutomaticParser parser_{&tokens_};
   SparqlQleverVisitor visitor_;
   explicit ParserAndVisitor(
-      string input,
+      string input, FeatureActivation featureActivation = {},
       SparqlQleverVisitor::DisableSomeChecksOnlyForTesting disableSomeChecks =
           SparqlQleverVisitor::DisableSomeChecksOnlyForTesting::False);
   ParserAndVisitor(
       string input, SparqlQleverVisitor::PrefixMap prefixes,
+      FeatureActivation featureActivation = {},
       SparqlQleverVisitor::DisableSomeChecksOnlyForTesting disableSomeChecks =
           SparqlQleverVisitor::DisableSomeChecksOnlyForTesting::False);
 

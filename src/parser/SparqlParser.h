@@ -6,6 +6,7 @@
 #include <string>
 
 #include "parser/ParsedQuery.h"
+#include "sparqlParser/SparqlQleverVisitor.h"
 
 // The SPARQL parser used by QLever. The actual parsing is delegated to a parser
 // that is based on ANTLR4, which recognises the complete SPARQL 1.1 QL grammar.
@@ -13,5 +14,6 @@
 // message is given.
 class SparqlParser {
  public:
-  static ParsedQuery parseQuery(std::string query);
+  static ParsedQuery parseQuery(std::string query,
+                                FeatureActivation featureActivation);
 };

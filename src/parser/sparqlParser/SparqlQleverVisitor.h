@@ -29,6 +29,13 @@ class Reversed {
   auto end() { return _iterable.rend(); }
 };
 
+struct FeatureActivation {
+  // SPARQL 1.1 Update
+  bool UpdateEnabled = true;
+  // SPARQL 1.1 Federated Query
+  bool FederatedQueryEnabled = true;
+};
+
 /**
  * This is a visitor that takes the parse tree from ANTLR and transforms it into
  * a `ParsedQuery`.
@@ -95,14 +102,20 @@ class SparqlQleverVisitor {
   // meaning of blank and anonymous nodes is different.
   bool isInsideConstructTriples_ = false;
 
+  // This struct whether some specific features are enabled or not. If a
+  // feature is not enabled, throw an exception while parsing.
+  FeatureActivation featureActivation_;
+
  public:
   SparqlQleverVisitor() = default;
   explicit SparqlQleverVisitor(
       PrefixMap prefixMap,
       DisableSomeChecksOnlyForTesting disableSomeChecksOnlyForTesting =
-          DisableSomeChecksOnlyForTesting::False)
+          DisableSomeChecksOnlyForTesting::False,
+      FeatureActivation featureActivation = FeatureActivation{})
       : prefixMap_{std::move(prefixMap)},
-        disableSomeChecksOnlyForTesting_{disableSomeChecksOnlyForTesting} {}
+        disableSomeChecksOnlyForTesting_{disableSomeChecksOnlyForTesting},
+        featureActivation_{featureActivation} {}
 
   const PrefixMap& prefixMap() const { return prefixMap_; }
   void setPrefixMapManually(PrefixMap map) { prefixMap_ = std::move(map); }

@@ -9,12 +9,14 @@
 using AntlrParser = SparqlAutomaticParser;
 
 // _____________________________________________________________________________
-ParsedQuery SparqlParser::parseQuery(std::string query) {
+ParsedQuery SparqlParser::parseQuery(std::string query,
+                                     FeatureActivation featureActivation) {
   // The second argument is the `PrefixMap` for QLever's internal IRIs.
   using S = std::string;
   sparqlParserHelpers::ParserAndVisitor p{
       std::move(query),
-      {{S{QLEVER_INTERNAL_PREFIX_NAME}, S{QLEVER_INTERNAL_PREFIX_IRI}}}};
+      {{S{QLEVER_INTERNAL_PREFIX_NAME}, S{QLEVER_INTERNAL_PREFIX_IRI}}},
+      featureActivation};
   // Note: `AntlrParser::query` is a method of `AntlrParser` (which is an alias
   // for `SparqlAutomaticParser`) that returns the `QueryContext*` for the whole
   // query.

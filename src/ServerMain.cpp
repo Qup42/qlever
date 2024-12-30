@@ -13,6 +13,7 @@
 #include "engine/Server.h"
 #include "global/Constants.h"
 #include "global/RuntimeParameters.h"
+#include "parser/sparqlParser/SparqlQleverVisitor.h"
 #include "util/MemorySize/MemorySize.h"
 #include "util/ParseableDuration.h"
 #include "util/ProgramOptionsHelpers.h"
@@ -47,6 +48,8 @@ int main(int argc, char** argv) {
   bool noPatterns;
   bool noPatternTrick;
   bool onlyPsoAndPosPermutations;
+  bool updateDisabled;
+  bool federatedQueryDisabled;
 
   ad_utility::MemorySize memoryMaxSize;
 
@@ -122,6 +125,13 @@ int main(int argc, char** argv) {
       "variables that are unbound in the query throw an exception. These "
       "queries technically are allowed by the SPARQL standard, but typically "
       "are the result of typos and unintended by the user");
+  // TODO:
+  // - test
+  // - only have default value once => update other usages
+  add("disable-update", po::bool_switch(&updateDisabled),
+      "Disable the SPARQL UPDATE endpoint.");
+  add("disable-federated-query", po::bool_switch(&federatedQueryDisabled),
+      "Disable the SPARQL SERVICE keyword for federated queries.");
   po::variables_map optionsMap;
 
   try {
@@ -142,8 +152,9 @@ int main(int argc, char** argv) {
             << qlever::version::GitShortHash << EMPH_OFF << std::endl;
 
   try {
+    FeatureActivation activation{!updateDisabled, !federatedQueryDisabled};
     Server server(port, numSimultaneousQueries, memoryMaxSize,
-                  std::move(accessToken), !noPatternTrick);
+                  std::move(accessToken), !noPatternTrick, activation);
     server.run(indexBasename, text, !noPatterns, !onlyPsoAndPosPermutations);
   } catch (const std::exception& e) {
     // This code should never be reached as all exceptions should be handled

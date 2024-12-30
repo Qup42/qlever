@@ -440,6 +440,10 @@ std::optional<Values> Visitor::visit(Parser::ValuesClauseContext* ctx) {
 
 // ____________________________________________________________________________________
 ParsedQuery Visitor::visit(Parser::UpdateContext* ctx) {
+  if (!featureActivation_.UpdateEnabled) {
+    reportError(ctx, "Server has been started with UPDATE disabled.");
+  }
+
   // The prologue (BASE and PREFIX declarations)  only affects the internal
   // state of the visitor.
   visit(ctx->prologue());
@@ -942,6 +946,10 @@ GraphPatternOperation Visitor::visit(Parser::ServiceGraphPatternContext* ctx) {
   GraphTerm varOrIri = visit(ctx->varOrIri());
   if (std::holds_alternative<Variable>(varOrIri)) {
     reportNotSupported(ctx->varOrIri(), "Variable endpoint in SERVICE is");
+  }
+  if (!featureActivation_.FederatedQueryEnabled) {
+    reportError(ctx,
+                "Server has been started with Federated queries disabled.");
   }
   AD_CONTRACT_CHECK(std::holds_alternative<Iri>(varOrIri));
   auto serviceIri =

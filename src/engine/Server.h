@@ -16,6 +16,7 @@
 #include "engine/SortPerformanceEstimator.h"
 #include "index/Index.h"
 #include "parser/SparqlParser.h"
+#include "parser/sparqlParser/SparqlQleverVisitor.h"
 #include "util/AllocatorWithLimit.h"
 #include "util/MemorySize/MemorySize.h"
 #include "util/ParseException.h"
@@ -38,7 +39,8 @@ class Server {
  public:
   explicit Server(unsigned short port, size_t numThreads,
                   ad_utility::MemorySize maxMem, std::string accessToken,
-                  bool usePatternTrick = true);
+                  bool usePatternTrick = true,
+                  FeatureActivation featureActivation = {});
 
   virtual ~Server() = default;
 
@@ -73,6 +75,7 @@ class Server {
   ad_utility::websocket::QueryRegistry queryRegistry_{};
 
   bool enablePatternTrick_;
+  FeatureActivation featureActivation_;
 
   /// Non-owning reference to the `QueryHub` instance living inside
   /// the `WebSocketHandler` created for `HttpServer`.

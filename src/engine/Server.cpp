@@ -31,7 +31,7 @@ using ad_utility::MediaType;
 // __________________________________________________________________________
 Server::Server(unsigned short port, size_t numThreads,
                ad_utility::MemorySize maxMem, std::string accessToken,
-               bool usePatternTrick)
+               bool usePatternTrick, FeatureActivation featureActivation)
     : numThreads_(numThreads),
       port_(port),
       accessToken_(std::move(accessToken)),
@@ -42,6 +42,7 @@ Server::Server(unsigned short port, size_t numThreads,
                  }},
       index_{allocator_},
       enablePatternTrick_(usePatternTrick),
+      featureActivation_{featureActivation},
       // The number of server threads currently also is the number of queries
       // that can be processed simultaneously.
       queryThreadPool_{numThreads} {
@@ -1075,7 +1076,7 @@ Server::PlannedQuery Server::parseAndPlan(
     const std::string& query, const vector<DatasetClause>& queryDatasets,
     QueryExecutionContext& qec, SharedCancellationHandle handle,
     TimeLimit timeLimit) const {
-  auto pq = SparqlParser::parseQuery(query);
+  auto pq = SparqlParser::parseQuery(query, featureActivation_);
   handle->throwIfCancelled();
   // SPARQL Protocol 2.1.4 specifies that the dataset from the query
   // parameters overrides the dataset from the query itself.
