@@ -14,6 +14,7 @@
 // message is given.
 class SparqlParser {
  public:
-  static ParsedQuery parseQuery(std::string query,
-                                FeatureActivation featureActivation);
+  static ParsedQuery parseQuery(
+      std::string query,
+      FeatureActivation featureActivation = FeatureActivation{});
 };

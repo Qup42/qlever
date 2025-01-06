@@ -1246,3 +1246,40 @@ TEST(ParserTest, LanguageFilterPostProcessing) {
         triples[2]);
   }
 }
+
+TEST(ParserTest, FeatureActivation) {
+  {
+    const string serviceQuery = "SELECT * WHERE { SERVICE <foo> { ?a ?b ?c } }";
+    AD_EXPECT_THROW_WITH_MESSAGE(
+        SparqlParser::parseQuery(
+            serviceQuery, FeatureActivation{.UpdateEnabled = true,
+                                            .FederatedQueryEnabled = false}),
+        testing::HasSubstr(
+            "Server has been started with Federated queries disabled."));
+    EXPECT_THAT(
+        SparqlParser::parseQuery(
+            serviceQuery, FeatureActivation{.UpdateEnabled = true,
+                                            .FederatedQueryEnabled = true}),
+        testing::_);
+  }
+  auto checkUpdate = [](const string& update,
+                        ad_utility::source_location l =
+                            ad_utility::source_location::current()) {
+    auto t = generateLocationTrace(l);
+    AD_EXPECT_THROW_WITH_MESSAGE(
+        SparqlParser::parseQuery(
+            update, FeatureActivation{.UpdateEnabled = false,
+                                      .FederatedQueryEnabled = true}),
+        testing::HasSubstr("Server has been started with UPDATE disabled."));
+    EXPECT_THAT(SparqlParser::parseQuery(
+                    update, FeatureActivation{.UpdateEnabled = true,
+                                              .FederatedQueryEnabled = true}),
+                testing::_);
+  };
+  {
+    checkUpdate(string("INSERT DATA { <a> <b> <c> }"));
+    checkUpdate("DELETE WHERE { ?a <b> <c> }");
+    checkUpdate(
+        "DELETE { <a> ?b <c> } INSERT { ?a <b> <c> } WHERE { ?a ?b <d> }");
+  }
+}

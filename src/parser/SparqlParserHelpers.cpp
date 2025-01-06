@@ -14,7 +14,7 @@ ParserAndVisitor::ParserAndVisitor(
     std::string input, FeatureActivation featureActivation,
     SparqlQleverVisitor::DisableSomeChecksOnlyForTesting disableSomeChecks)
     : input_{std::move(input)},
-      visitor_{{}, disableSomeChecks, featureActivation} {
+      visitor_{{}, featureActivation, disableSomeChecks} {
   // The default in ANTLR is to log all errors to the console and to continue
   // the parsing. We need to turn parse errors into exceptions instead to
   // propagate them to the user.

@@ -50,9 +50,11 @@ const ad_utility::HashMap<std::string, std::string> defaultPrefixMap{
 template <auto F, bool testInsideConstructTemplate = false>
 auto parse =
     [](const string& input, SparqlQleverVisitor::PrefixMap prefixes = {},
+       FeatureActivation featureActivation = {},
        SparqlQleverVisitor::DisableSomeChecksOnlyForTesting disableSomeChecks =
            SparqlQleverVisitor::DisableSomeChecksOnlyForTesting::False) {
-      ParserAndVisitor p{input, std::move(prefixes), disableSomeChecks};
+      ParserAndVisitor p{input, std::move(prefixes), featureActivation,
+                         disableSomeChecks};
       if (testInsideConstructTemplate) {
         p.visitor_.setParseModeToInsideConstructTemplateForTesting();
       }
@@ -77,6 +79,7 @@ template <auto Clause, bool parseInsideConstructTemplate = false,
           typename Value = decltype(parse<Clause>("").resultOfParse_)>
 struct ExpectCompleteParse {
   SparqlQleverVisitor::PrefixMap prefixMap_ = {};
+  FeatureActivation featureActivation_ = {};
   SparqlQleverVisitor::DisableSomeChecksOnlyForTesting disableSomeChecks =
       SparqlQleverVisitor::DisableSomeChecksOnlyForTesting::False;
 
@@ -107,10 +110,10 @@ struct ExpectCompleteParse {
                       ad_utility::source_location::current()) const {
     auto tr = generateLocationTrace(l, "successful parsing was expected here");
     EXPECT_NO_THROW({
-      return expectCompleteParse(
-          parse<Clause, parseInsideConstructTemplate>(
-              input, std::move(prefixMap), disableSomeChecks),
-          matcher, l);
+      return expectCompleteParse(parse<Clause, parseInsideConstructTemplate>(
+                                     input, std::move(prefixMap),
+                                     featureActivation_, disableSomeChecks),
+                                 matcher, l);
     });
   };
 };
@@ -118,6 +121,7 @@ struct ExpectCompleteParse {
 template <auto Clause>
 struct ExpectParseFails {
   SparqlQleverVisitor::PrefixMap prefixMap_ = {};
+  FeatureActivation featureActivation_ = {};
   SparqlQleverVisitor::DisableSomeChecksOnlyForTesting disableSomeChecks =
       SparqlQleverVisitor::DisableSomeChecksOnlyForTesting::False;
 
@@ -134,7 +138,8 @@ struct ExpectParseFails {
       ad_utility::source_location l = ad_utility::source_location::current()) {
     auto trace = generateLocationTrace(l);
     AD_EXPECT_THROW_WITH_MESSAGE(
-        parse<Clause>(input, std::move(prefixMap), disableSomeChecks),
+        parse<Clause>(input, std::move(prefixMap), featureActivation_,
+                      disableSomeChecks),
         messageMatcher);
   }
 };
@@ -518,7 +523,7 @@ TEST(SparqlParser, VariableWithDollarSign) {
 
 TEST(SparqlParser, Bind) {
   auto noChecks = SparqlQleverVisitor::DisableSomeChecksOnlyForTesting::True;
-  auto expectBind = ExpectCompleteParse<&Parser::bind>{{}, noChecks};
+  auto expectBind = ExpectCompleteParse<&Parser::bind>{{}, {}, noChecks};
   expectBind("BIND (10 - 5 as ?a)", m::Bind(Var{"?a"}, "10 - 5"));
   expectBind("bInD (?age - 10 As ?s)", m::Bind(Var{"?s"}, "?age - 10"));
 }
@@ -882,6 +887,9 @@ TEST(SparqlParser, GroupGraphPattern) {
       ExpectCompleteParse<&Parser::groupGraphPattern>{defaultPrefixMap};
   auto expectGroupGraphPatternFails =
       ExpectParseFails<&Parser::groupGraphPattern>{{}};
+  auto expectGroupGraphPatternNoFederationFails =
+      ExpectParseFails<&Parser::groupGraphPattern>{
+          {}, {.UpdateEnabled = true, .FederatedQueryEnabled = false}};
   auto DummyTriplesMatcher = m::Triples({{Var{"?x"}, "?y", Var{"?z"}}});
 
   // Empty GraphPatterns.
@@ -1001,15 +1009,25 @@ TEST(SparqlParser, GroupGraphPattern) {
       m::GraphPattern(m::Service(TripleComponent::Iri::fromIriref("<ep>"),
                                  {Var{"?s"}, Var{"?o"}},
                                  "{ { SELECT ?s ?o WHERE { ?s ?p ?o } } }")));
+  expectGroupGraphPatternNoFederationFails(
+      "{ SERVICE <ep> { { SELECT ?s ?o WHERE { ?s ?p ?o } } } }",
+      testing::HasSubstr(
+          "Server has been started with Federated queries disabled."));
 
   expectGraphPattern(
       "{ SERVICE SILENT <ep> { { SELECT ?s ?o WHERE { ?s ?p ?o } } } }",
       m::GraphPattern(m::Service(
           TripleComponent::Iri::fromIriref("<ep>"), {Var{"?s"}, Var{"?o"}},
           "{ { SELECT ?s ?o WHERE { ?s ?p ?o } } }", "", true)));
+  expectGroupGraphPatternNoFederationFails(
+      "{ SERVICE SILENT <ep> { { SELECT ?s ?o WHERE { ?s ?p ?o } } } }",
+      testing::HasSubstr(
+          "Server has been started with Federated queries disabled."));
 
   // SERVICE with a variable endpoint is not yet supported.
   expectGroupGraphPatternFails("{ SERVICE ?endpoint { ?s ?p ?o } }");
+  expectGroupGraphPatternNoFederationFails(
+      "{ SERVICE ?endpoint { ?s ?p ?o } }");
 
   expectGraphPattern("{ GRAPH ?g { ?x <is-a> <Actor> }}",
                      m::GraphPattern(m::GroupGraphPatternWithGraph(
@@ -2049,11 +2067,14 @@ TEST(SparqlParser, QuadData) {
 
 TEST(SparqlParser, Update) {
   auto expectUpdate_ = ExpectCompleteParse<&Parser::update>{defaultPrefixMap};
+  auto expectUpdateNoUpdateFails = ExpectParseFails<&Parser::update>{
+      {}, {.UpdateEnabled = false, .FederatedQueryEnabled = true}};
   // Automatically test all updates for their `_originalString`.
-  auto expectUpdate = [&expectUpdate_](const std::string& query,
-                                       auto&& expected) {
+  auto expectUpdate = [&expectUpdate_, &expectUpdateNoUpdateFails](
+                          const std::string& query, auto&& expected) {
     expectUpdate_(query,
                   testing::AllOf(expected, m::pq::OriginalString(query)));
+    expectUpdateNoUpdateFails(query);
   };
   auto expectUpdateFails = ExpectParseFails<&Parser::update>{};
   auto Iri = [](std::string_view stringWithBrackets) {

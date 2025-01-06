@@ -110,9 +110,9 @@ class SparqlQleverVisitor {
   SparqlQleverVisitor() = default;
   explicit SparqlQleverVisitor(
       PrefixMap prefixMap,
+      FeatureActivation featureActivation = FeatureActivation{},
       DisableSomeChecksOnlyForTesting disableSomeChecksOnlyForTesting =
-          DisableSomeChecksOnlyForTesting::False,
-      FeatureActivation featureActivation = FeatureActivation{})
+          DisableSomeChecksOnlyForTesting::False)
       : prefixMap_{std::move(prefixMap)},
         disableSomeChecksOnlyForTesting_{disableSomeChecksOnlyForTesting},
         featureActivation_{featureActivation} {}

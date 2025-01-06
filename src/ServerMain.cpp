@@ -125,9 +125,6 @@ int main(int argc, char** argv) {
       "variables that are unbound in the query throw an exception. These "
       "queries technically are allowed by the SPARQL standard, but typically "
       "are the result of typos and unintended by the user");
-  // TODO:
-  // - test
-  // - only have default value once => update other usages
   add("disable-update", po::bool_switch(&updateDisabled),
       "Disable the SPARQL UPDATE endpoint.");
   add("disable-federated-query", po::bool_switch(&federatedQueryDisabled),
