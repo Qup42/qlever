@@ -182,8 +182,7 @@ class Server {
   // Execute an update operation. The function must have exclusive access to the
   // DeltaTriples object.
   void processUpdateImpl(
-      const ad_utility::url_parser::ParamValueMap& params, const string& update,
-      ad_utility::Timer& requestTimer, TimeLimit timeLimit, auto& messageSender,
+      const PlannedQuery& plannedQuery, ad_utility::Timer& requestTimer,
       ad_utility::SharedCancellationHandle cancellationHandle,
       DeltaTriples& deltaTriples);
 
@@ -230,13 +229,17 @@ class Server {
       TimeLimit timeLimit)
       -> ad_utility::InvocableWithExactReturnType<void> auto;
 
-  /// Run the SPARQL parser and then the query planner on the `query`. All
-  /// computation is performed on the `threadPool_`.
+  /// Run the SPARQL parser and then the query planner on the `query`.
   PlannedQuery parseAndPlan(const std::string& query,
                             const vector<DatasetClause>& queryDatasets,
                             QueryExecutionContext& qec,
                             SharedCancellationHandle handle,
                             TimeLimit timeLimit) const;
+
+  /// Run the query planner on the parsed query.
+  PlannedQuery planQuery(ParsedQuery pq, QueryExecutionContext& qec,
+                         SharedCancellationHandle handle,
+                         TimeLimit timeLimit) const;
 
   /// Acquire the `CancellationHandle` for the given `QueryId`, start the
   /// watchdog and call `cancelAfterDeadline` to set the timeout after

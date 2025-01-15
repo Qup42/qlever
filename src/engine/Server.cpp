@@ -925,20 +925,9 @@ Awaitable<void> Server::processQuery(
 
 // ____________________________________________________________________________
 void Server::processUpdateImpl(
-    const ad_utility::url_parser::ParamValueMap& params, const string& update,
-    ad_utility::Timer& requestTimer, TimeLimit timeLimit, auto& messageSender,
+    const PlannedQuery& plannedQuery, ad_utility::Timer& requestTimer,
     ad_utility::SharedCancellationHandle cancellationHandle,
     DeltaTriples& deltaTriples) {
-  auto [pinSubtrees, pinResult] = determineResultPinning(params);
-  LOG(INFO) << "Processing the following SPARQL update:"
-            << (pinResult ? " [pin result]" : "")
-            << (pinSubtrees ? " [pin subresults]" : "") << "\n"
-            << update << std::endl;
-  QueryExecutionContext qec(index_, &cache_, allocator_,
-                            sortPerformanceEstimator_, std::ref(messageSender),
-                            pinSubtrees, pinResult);
-  auto plannedQuery = setupPlannedQuery(params, update, qec, cancellationHandle,
-                                        timeLimit, requestTimer);
   auto qet = plannedQuery.queryExecutionTree_;
 
   if (!plannedQuery.parsedQuery_.hasUpdateClause()) {
@@ -984,11 +973,21 @@ Awaitable<void> Server::processUpdate(
         index_.deltaTriplesManager().modify(
             [this, &params, &update, &requestTimer, &timeLimit, &messageSender,
              &cancellationHandle](auto& deltaTriples) {
+              auto [pinSubtrees, pinResult] = determineResultPinning(params);
+              LOG(INFO) << "Processing the following SPARQL update:"
+                        << (pinResult ? " [pin result]" : "")
+                        << (pinSubtrees ? " [pin subresults]" : "") << "\n"
+                        << update << std::endl;
+              QueryExecutionContext qec(
+                  index_, &cache_, allocator_, sortPerformanceEstimator_,
+                  std::ref(messageSender), pinSubtrees, pinResult);
+              auto plannedQuery =
+                  setupPlannedQuery(params, update, qec, cancellationHandle,
+                                    timeLimit, requestTimer);
               // Use `this` explicitly to silence false-positive errors on
               // captured `this` being unused.
-              this->processUpdateImpl(params, update, requestTimer, timeLimit,
-                                      messageSender, cancellationHandle,
-                                      deltaTriples);
+              this->processUpdateImpl(plannedQuery, requestTimer,
+                                      cancellationHandle, deltaTriples);
             });
       },
       cancellationHandle);
@@ -1123,6 +1122,13 @@ Server::PlannedQuery Server::parseAndPlan(
     pq.datasetClauses_ =
         parsedQuery::DatasetClauses::fromClauses(queryDatasets);
   }
+  return planQuery(std::move(pq), qec, handle, timeLimit);
+}
+
+Server::PlannedQuery Server::planQuery(ParsedQuery pq,
+                                       QueryExecutionContext& qec,
+                                       SharedCancellationHandle handle,
+                                       TimeLimit timeLimit) const {
   QueryPlanner qp(&qec, handle);
   qp.setEnablePatternTrick(enablePatternTrick_);
   auto qet = qp.createExecutionTree(pq);
