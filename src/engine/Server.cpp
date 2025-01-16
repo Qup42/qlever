@@ -576,10 +576,10 @@ Awaitable<void> Server::process(
             cancellationHandle);
         co_await std::move(coroutine);
 
+        // TODO<qup42> send some metadata in the response, see #1675
         co_await send(ad_utility::httpUtils::createOkResponse(
             "Update successful", request, MediaType::textPlain));
         co_return;
-        // TODO: still send some metadata
       } else {
         MediaType mediaType = determineMediaType(parameters, request);
         LOG(INFO) << "Requested media type of result is \""
@@ -587,7 +587,6 @@ Awaitable<void> Server::process(
 
         co_await executePlannedQuery(request, send, parameters, requestTimer,
                                      pq, mediaType, cancellationHandle);
-        // TODO: still send some metadata
         co_return;
       }
       co_return;
@@ -921,25 +920,6 @@ Awaitable<void> Server::processQuery(
   co_await executePlannedQuery(request, send, params, requestTimer,
                                plannedQuery, mediaType, cancellationHandle);
 
-  // Print the runtime info. This needs to be done after the query
-  // was computed.
-  LOG(INFO) << "Done processing query and sending result"
-            << ", total time was " << requestTimer.msecs().count() << " ms"
-            << std::endl;
-
-  // Log that we are done with the query and how long it took.
-  //
-  // NOTE: We need to explicitly stop the `requestTimer` here because in the
-  // sending code above, it is done only in some cases and not in others (in
-  // particular, not for TSV and CSV because for those, the result does not
-  // contain timing information).
-  //
-  // TODO<joka921> Also log an identifier of the query.
-  LOG(DEBUG) << "Runtime Info:\n"
-             << plannedQuery.queryExecutionTree_.getRootOperation()
-                    ->runtimeInfo()
-                    .toString()
-             << std::endl;
   co_return;
 }
 
@@ -1012,7 +992,7 @@ Awaitable<void> Server::processUpdate(
       cancellationHandle);
   co_await std::move(coroutine);
 
-  // TODO<qup42> send a proper response
+  // TODO<qup42> send some metadata in the response, see #1675
   // SPARQL 1.1 Protocol 2.2.4 Successful Responses: "The response body of a
   // successful update request is implementation defined."
   co_await send(ad_utility::httpUtils::createOkResponse(
@@ -1051,6 +1031,25 @@ Awaitable<void> Server::executePlannedQuery(
   // format.
   co_await sendStreamableResponse(request, send, mediaType, pq, qet,
                                   requestTimer, cancellationHandle);
+
+  // Log that we are done with the query and how long it took.
+  //
+  // NOTE: We need to explicitly stop the `requestTimer` here because in the
+  // sending code above, it is done only in some cases and not in others (in
+  // particular, not for TSV and CSV because for those, the result does not
+  // contain timing information).
+  requestTimer.stop();
+  // TODO<joka921> Also log an identifier of the query.
+  LOG(INFO) << "Done processing query and sending result"
+            << ", total time was " << requestTimer.msecs().count() << " ms"
+            << std::endl;
+
+  // Print the runtime info. This needs to be done after the query
+  // was computed.
+  LOG(DEBUG)
+      << "Runtime Info:\n"
+      << pq.queryExecutionTree_.getRootOperation()->runtimeInfo().toString()
+      << std::endl;
 }
 
 // ____________________________________________________________________________
