@@ -977,8 +977,8 @@ Awaitable<void> Server::processUpdate(
     ad_utility::Timer& requestTimer,
     const ad_utility::httpUtils::HttpRequest auto& request, auto&& send,
     TimeLimit timeLimit) {
-  auto messageSender = createMessageSender(queryHub_, request, update);
-
+  ad_utility::websocket::MessageSender messageSender =
+      createMessageSender(queryHub_, request, update);
   auto [cancellationHandle, cancelTimeoutOnDestruction] =
       setupCancellationHandle(messageSender.getQueryId(), timeLimit);
 
