@@ -156,6 +156,13 @@ class Server {
       ad_utility::Timer& requestTimer,
       const ad_utility::httpUtils::HttpRequest auto& request, auto&& send,
       TimeLimit timeLimit);
+  // Execute the planned query and send the result to the client.
+  Awaitable<void> executePlannedQuery(
+      const ad_utility::httpUtils::HttpRequest auto& request, auto&& send,
+      const ad_utility::url_parser::ParamValueMap& parameters,
+      ad_utility::Timer& requestTimer, PlannedQuery& pq,
+      const ad_utility::MediaType& mediaType,
+      ad_utility::SharedCancellationHandle cancellationHandle);
 
   // Determine the media type to be used for the result. The media type is
   // determined (in this order) by the current action (e.g.,
