@@ -528,19 +528,55 @@ Awaitable<void> Server::process(
   };
   auto visitGraphStore =
       [&send, &request, &checkParameter, &accessTokenOk, &parameters,
-       &requireValidAccessToken,
-       this](ad_utility::url_parser::sparqlOperation::GraphStoreOperation)
+       &requireValidAccessToken, this, &requestTimer](
+          ad_utility::url_parser::sparqlOperation::GraphStoreOperation)
       -> Awaitable<void> {
-    // TODO: finish
-    ParsedQuery parsedQuery =
-        GraphStoreProtocol::transformGraphStoreProtocol(request);
-
     if (auto timeLimit = co_await verifyUserSubmittedQueryTimeout(
             checkParameter("timeout", std::nullopt), accessTokenOk, request,
             send)) {
+      ParsedQuery parsedQuery =
+          GraphStoreProtocol::transformGraphStoreProtocol(request);
+      ad_utility::websocket::MessageSender messageSender =
+          createMessageSender(queryHub_, request, "");
+      auto [cancellationHandle, cancelTimeoutOnDestruction] =
+          setupCancellationHandle(messageSender.getQueryId(),
+                                  timeLimit.value());
+
+      // Do the query planning. This creates a `QueryExecutionTree`, which will
+      // then be used to process the query.
+      auto [pinSubtrees, pinResult] = determineResultPinning(parameters);
+      QueryExecutionContext qec(
+          index_, &cache_, allocator_, sortPerformanceEstimator_,
+          std::ref(messageSender), pinSubtrees, pinResult);
+
+      PlannedQuery pq = planQuery(std::move(parsedQuery), qec,
+                                  cancellationHandle, timeLimit.value());
+      pq = finishPlannedQuery(std::move(pq), requestTimer);
+
       if (parsedQuery.hasUpdateClause()) {
         requireValidAccessToken("SPARQL Update");
+        index_.deltaTriplesManager().modify(
+            [this, &pq, &requestTimer,
+             &cancellationHandle](auto& deltaTriples) {
+              // Use `this` explicitly to silence false-positive errors on
+              // captured `this` being unused.
+              this->processUpdateImpl(pq, requestTimer, cancellationHandle,
+                                      deltaTriples);
+            });
+
+        co_await send(ad_utility::httpUtils::createOkResponse(
+            "Update successful", request, MediaType::textPlain));
+        co_return;
+        // TODO: still send some metadata
       } else {
+        MediaType mediaType = determineMediaType(parameters, request);
+        LOG(INFO) << "Requested media type of result is \""
+                  << ad_utility::toString(mediaType) << "\"" << std::endl;
+        auto qet = pq.queryExecutionTree_;
+        co_await sendStreamableResponse(request, send, mediaType, pq, qet,
+                                        requestTimer, cancellationHandle);
+        // TODO: still send some metadata
+        co_return;
       }
       co_return;
     } else {
@@ -590,14 +626,8 @@ std::pair<bool, bool> Server::determineResultPinning(
 }
 
 // ____________________________________________________________________________
-Server::PlannedQuery Server::setupPlannedQuery(
-    const ad_utility::url_parser::ParamValueMap& params,
-    const std::string& operation, QueryExecutionContext& qec,
-    SharedCancellationHandle handle, TimeLimit timeLimit,
-    const ad_utility::Timer& requestTimer) const {
-  auto queryDatasets = ad_utility::url_parser::parseDatasetClauses(params);
-  PlannedQuery plannedQuery =
-      parseAndPlan(operation, queryDatasets, qec, handle, timeLimit);
+Server::PlannedQuery Server::finishPlannedQuery(
+    PlannedQuery plannedQuery, const ad_utility::Timer& requestTimer) const {
   auto& qet = plannedQuery.queryExecutionTree_;
   qet.isRoot() = true;  // allow pinning of the final result
   auto timeForQueryPlanning = requestTimer.msecs();
@@ -610,6 +640,7 @@ Server::PlannedQuery Server::setupPlannedQuery(
 
   return plannedQuery;
 }
+
 // _____________________________________________________________________________
 json Server::composeErrorResponseJson(
     const string& query, const std::string& errorMsg,
@@ -861,8 +892,11 @@ Awaitable<void> Server::processQuery(
       queryThreadPool_,
       [this, &params, &query, &qec, cancellationHandle, &timeLimit,
        &requestTimer]() -> std::optional<PlannedQuery> {
-        return setupPlannedQuery(params, query, qec, cancellationHandle,
-                                 timeLimit, requestTimer);
+        auto queryDatasets =
+            ad_utility::url_parser::parseDatasetClauses(params);
+        PlannedQuery plannedQuery = parseAndPlan(query, queryDatasets, qec,
+                                                 cancellationHandle, timeLimit);
+        return finishPlannedQuery(std::move(plannedQuery), requestTimer);
       },
       cancellationHandle);
   auto plannedQueryOpt = co_await std::move(coroutine);
@@ -981,9 +1015,12 @@ Awaitable<void> Server::processUpdate(
               QueryExecutionContext qec(
                   index_, &cache_, allocator_, sortPerformanceEstimator_,
                   std::ref(messageSender), pinSubtrees, pinResult);
-              auto plannedQuery =
-                  setupPlannedQuery(params, update, qec, cancellationHandle,
-                                    timeLimit, requestTimer);
+              auto queryDatasets =
+                  ad_utility::url_parser::parseDatasetClauses(params);
+              PlannedQuery plannedQuery = parseAndPlan(
+                  update, queryDatasets, qec, cancellationHandle, timeLimit);
+              plannedQuery =
+                  finishPlannedQuery(std::move(plannedQuery), requestTimer);
               // Use `this` explicitly to silence false-positive errors on
               // captured `this` being unused.
               this->processUpdateImpl(plannedQuery, requestTimer,
