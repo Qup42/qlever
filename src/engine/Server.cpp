@@ -540,16 +540,9 @@ Awaitable<void> Server::process(
           setupCancellationHandle(messageSender.getQueryId(),
                                   timeLimit.value());
 
-      // Do the query planning. This creates a `QueryExecutionTree`, which will
-      // then be used to process the query.
-      auto [pinSubtrees, pinResult] = determineResultPinning(parameters);
       // TODO: add some way to print a representation of the request
-      LOG(INFO) << "Processing a SPARQL Graph Store HTTP request:"
-                << (pinResult ? " [pin result]" : "")
-                << (pinSubtrees ? " [pin subresults]" : "") << std::endl;
-      QueryExecutionContext qec(
-          index_, &cache_, allocator_, sortPerformanceEstimator_,
-          std::ref(messageSender), pinSubtrees, pinResult);
+      QueryExecutionContext qec = createQueryExecutionContext(
+          parameters, "SPARQL Graph Store HTTP", messageSender);
 
       ParsedQuery parsedQuery =
           GraphStoreProtocol::transformGraphStoreProtocol(request);
@@ -889,16 +882,9 @@ Awaitable<void> Server::processQuery(
   auto [cancellationHandle, cancelTimeoutOnDestruction] =
       setupCancellationHandle(messageSender.getQueryId(), timeLimit);
 
-  // Do the query planning. This creates a `QueryExecutionTree`, which will
-  // then be used to process the query.
-  auto [pinSubtrees, pinResult] = determineResultPinning(params);
-  LOG(INFO) << "Processing the following SPARQL query:"
-            << (pinResult ? " [pin result]" : "")
-            << (pinSubtrees ? " [pin subresults]" : "") << "\n"
-            << query << std::endl;
-  QueryExecutionContext qec(index_, &cache_, allocator_,
-                            sortPerformanceEstimator_, std::ref(messageSender),
-                            pinSubtrees, pinResult);
+  LOG(INFO) << "Processing the following SPARQL query:\n" << query << std::endl;
+  QueryExecutionContext qec =
+      createQueryExecutionContext(params, "SPARQL Query", messageSender);
 
   // The usage of an `optional` here is required because of a limitation in
   // Boost::Asio which forces us to use default-constructible result types with
@@ -1007,14 +993,10 @@ Awaitable<void> Server::processUpdate(
         index_.deltaTriplesManager().modify(
             [this, &params, &update, &requestTimer, &timeLimit, &messageSender,
              &cancellationHandle](auto& deltaTriples) {
-              auto [pinSubtrees, pinResult] = determineResultPinning(params);
-              LOG(INFO) << "Processing the following SPARQL update:"
-                        << (pinResult ? " [pin result]" : "")
-                        << (pinSubtrees ? " [pin subresults]" : "") << "\n"
+              LOG(INFO) << "Processing the following SPARQL update:\n"
                         << update << std::endl;
-              QueryExecutionContext qec(
-                  index_, &cache_, allocator_, sortPerformanceEstimator_,
-                  std::ref(messageSender), pinSubtrees, pinResult);
+              QueryExecutionContext qec = createQueryExecutionContext(
+                  params, "SPARQL Update", messageSender);
               auto queryDatasets =
                   ad_utility::url_parser::parseDatasetClauses(params);
               PlannedQuery plannedQuery = parseAndPlan(
@@ -1233,4 +1215,22 @@ bool Server::checkAccessToken(
     LOG(DEBUG) << accessTokenProvidedMsg << " and correct" << std::endl;
     return true;
   }
+}
+
+// _____________________________________________________________________________
+QueryExecutionContext Server::createQueryExecutionContext(
+    const ad_utility::url_parser::ParamValueMap& params,
+    const std::string& what,
+    ad_utility::websocket::MessageSender& messageSender) {
+  auto [pinSubtrees, pinResult] = determineResultPinning(params);
+  LOG(INFO) << "Processing " << what << ": "
+            << (pinResult ? " [pin result]" : "")
+            << (pinSubtrees ? " [pin subresults]" : "") << std::endl;
+  return {index_,
+          &cache_,
+          allocator_,
+          sortPerformanceEstimator_,
+          std::ref(messageSender),
+          pinSubtrees,
+          pinResult};
 }

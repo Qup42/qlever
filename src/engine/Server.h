@@ -263,6 +263,13 @@ class Server {
   /// HTTP error response.
   bool checkAccessToken(std::optional<std::string_view> accessToken) const;
 
+  // Create a `QueryExecutionContext` that will be used to process the query or
+  // update.
+  QueryExecutionContext createQueryExecutionContext(
+      const ad_utility::url_parser::ParamValueMap& params,
+      const std::string& what,
+      ad_utility::websocket::MessageSender& messageSender);
+
   /// Check if user-provided timeout is authorized with a valid access-token or
   /// lower than the server default. Return an empty optional and send a 403
   /// Forbidden HTTP response if the change is not allowed. Return the new
