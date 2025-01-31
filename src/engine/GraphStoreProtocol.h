@@ -85,6 +85,8 @@ class GraphStoreProtocol {
     updateClause::GraphUpdate up{std::move(convertedTriples), {}};
     ParsedQuery res;
     res._clause = parsedQuery::UpdateClause{std::move(up)};
+    res._originalString =
+        "Unavailable for SPARQL Graph Store Protocol POST operation";
     return res;
   }
   FRIEND_TEST(GraphStoreProtocolTest, transformPost);

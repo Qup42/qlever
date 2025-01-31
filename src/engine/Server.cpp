@@ -354,10 +354,12 @@ Awaitable<void> Server::process(
     if (auto timeLimit = co_await verifyUserSubmittedQueryTimeout(
             checkParameter("timeout", std::nullopt), accessTokenOk, request,
             send)) {
+      ParsedQuery parsedQuery = parseOperation(query);
       ad_utility::websocket::MessageSender messageSender =
           createMessageSender(queryHub_, request, query.query_);
-      auto [parsedQuery, qec, cancellationHandle, cancelTimeoutOnDestruction] =
-          parseOperation(messageSender, parameters, query, timeLimit.value());
+      auto [qec, cancellationHandle, cancelTimeoutOnDestruction] =
+          prepareExecutionContext(messageSender, parameters, "SPARQL Query",
+                                  query.query_, timeLimit.value());
       co_return co_await processQueryOrUpdate<Query>(
           parameters, std::move(parsedQuery), cancellationHandle, qec,
           requestTimer, std::move(request), send, timeLimit.value());
@@ -375,10 +377,12 @@ Awaitable<void> Server::process(
     if (auto timeLimit = co_await verifyUserSubmittedQueryTimeout(
             checkParameter("timeout", std::nullopt), accessTokenOk, request,
             send)) {
+      ParsedQuery parsedUpdate = parseOperation(update);
       ad_utility::websocket::MessageSender messageSender =
           createMessageSender(queryHub_, request, update.update_);
-      auto [parsedUpdate, qec, cancellationHandle, cancelTimeoutOnDestruction] =
-          parseOperation(messageSender, parameters, update, timeLimit.value());
+      auto [qec, cancellationHandle, cancelTimeoutOnDestruction] =
+          prepareExecutionContext(messageSender, parameters, "SPARQL Update",
+                                  update.update_, timeLimit.value());
       co_return co_await processQueryOrUpdate<Update>(
           parameters, std::move(parsedUpdate), cancellationHandle, qec,
           requestTimer, std::move(request), send, timeLimit.value());
@@ -386,6 +390,34 @@ Awaitable<void> Server::process(
       // If the optional is empty, this indicates an error response has been
       // sent to the client already. We can stop here.
       co_return;
+    }
+  };
+  auto visitGraphStore =
+      [&send, &request, &checkParameter, &accessTokenOk, &parameters,
+       &requireValidAccessToken, this, &requestTimer](
+          const ad_utility::url_parser::sparqlOperation::GraphStoreOperation&)
+      -> Awaitable<void> {
+    ParsedQuery parsedOperation =
+        GraphStoreProtocol::transformGraphStoreProtocol(request);
+    if (auto timeLimit = co_await verifyUserSubmittedQueryTimeout(
+            checkParameter("timeout", std::nullopt), accessTokenOk, request,
+            send)) {
+      ad_utility::websocket::MessageSender messageSender =
+          createMessageSender(queryHub_, request, "");
+      auto [qec, cancellationHandle, cancelTimeoutOnDestruction] =
+          prepareExecutionContext(
+              messageSender, parameters, "Graph Store Operation",
+              parsedOperation._originalString, timeLimit.value());
+      if (parsedOperation.hasUpdateClause()) {
+        requireValidAccessToken("Graph Store Update (POST)");
+        co_return co_await processQueryOrUpdate<Update>(
+            parameters, std::move(parsedOperation), cancellationHandle, qec,
+            requestTimer, std::move(request), send, timeLimit.value());
+      } else {
+        co_return co_await processQueryOrUpdate<Query>(
+            parameters, std::move(parsedOperation), cancellationHandle, qec,
+            requestTimer, std::move(request), send, timeLimit.value());
+      }
     }
   };
   auto visitNone = [&response, &send,
@@ -410,7 +442,8 @@ Awaitable<void> Server::process(
   };
 
   co_return co_await std::visit(
-      ad_utility::OverloadCallOperator{visitQuery, visitUpdate, visitNone},
+      ad_utility::OverloadCallOperator{visitQuery, visitUpdate, visitGraphStore,
+                                       visitNone},
       std::move(parsedHttpRequest.operation_));
 }
 
@@ -458,22 +491,35 @@ auto Server::setupCancellationHandle(
 
 // ____________________________________________________________________________
 template <typename Operation>
-auto Server::parseOperation(ad_utility::websocket::MessageSender& messageSender,
-                            const ad_utility::url_parser::ParamValueMap& params,
-                            const Operation& operation, TimeLimit timeLimit) {
+ParsedQuery Server::parseOperation(const Operation& operation) {
   static_assert(ad_utility::SameAsAny<Operation, Query, Update>);
-  std::string_view operationName;
   // The operation string was to be copied, do it here at the beginning.
   std::string operationSPARQL;
   if constexpr (std::is_same_v<Operation, Query>) {
-    operationName = "SPARQL Query";
     operationSPARQL = operation.query_;
   } else {
     static_assert(std::is_same_v<Operation, Update>);
-    operationName = "SPARQL Update";
     operationSPARQL = operation.update_;
   }
 
+  ParsedQuery parsedQuery =
+      SparqlParser::parseQuery(std::move(operationSPARQL));
+  // SPARQL Protocol 2.1.4 specifies that the dataset from the query
+  // parameters overrides the dataset from the query itself.
+  if (!operation.datasetClauses_.empty()) {
+    parsedQuery.datasetClauses_ =
+        parsedQuery::DatasetClauses::fromClauses(operation.datasetClauses_);
+  }
+
+  return parsedQuery;
+}
+
+// ____________________________________________________________________________
+auto Server::prepareExecutionContext(
+    ad_utility::websocket::MessageSender& messageSender,
+    const ad_utility::url_parser::ParamValueMap& params,
+    std::string_view operationName, std::string_view operationSPARQL,
+    TimeLimit timeLimit) {
   auto [cancellationHandle, cancelTimeoutOnDestruction] =
       setupCancellationHandle(messageSender.getQueryId(), timeLimit);
 
@@ -487,17 +533,8 @@ auto Server::parseOperation(ad_utility::websocket::MessageSender& messageSender,
   QueryExecutionContext qec(index_, &cache_, allocator_,
                             sortPerformanceEstimator_, std::ref(messageSender),
                             pinSubtrees, pinResult);
-  ParsedQuery parsedQuery =
-      SparqlParser::parseQuery(std::move(operationSPARQL));
-  // SPARQL Protocol 2.1.4 specifies that the dataset from the query
-  // parameters overrides the dataset from the query itself.
-  if (!operation.datasetClauses_.empty()) {
-    parsedQuery.datasetClauses_ =
-        parsedQuery::DatasetClauses::fromClauses(operation.datasetClauses_);
-  }
 
-  return std::tuple{std::move(parsedQuery), std::move(qec),
-                    std::move(cancellationHandle),
+  return std::tuple{std::move(qec), std::move(cancellationHandle),
                     std::move(cancelTimeoutOnDestruction)};
 }
 
@@ -724,7 +761,7 @@ MediaType Server::determineMediaType(
 ad_utility::websocket::MessageSender Server::createMessageSender(
     const std::weak_ptr<ad_utility::websocket::QueryHub>& queryHub,
     const ad_utility::httpUtils::HttpRequest auto& request,
-    const string& operation) {
+    std::string_view operation) {
   auto queryHubLock = queryHub.lock();
   AD_CORRECTNESS_CHECK(queryHubLock);
   ad_utility::websocket::MessageSender messageSender{

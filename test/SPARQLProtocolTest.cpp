@@ -18,10 +18,10 @@ using namespace ad_utility::url_parser::sparqlOperation;
 using namespace ad_utility::testing;
 
 namespace {
-auto ParsedRequestIs = [](const std::string& path,
-                          const std::optional<std::string>& accessToken,
-                          const ParamValueMap& parameters,
-                          const std::variant<Query, Update, None>& operation)
+auto ParsedRequestIs =
+    [](const std::string& path, const std::optional<std::string>& accessToken,
+       const ParamValueMap& parameters,
+       const std::variant<Query, Update, GraphStoreOperation, None>& operation)
     -> testing::Matcher<const ParsedRequest> {
   return testing::AllOf(
       AD_FIELD(ad_utility::url_parser::ParsedRequest, path_, testing::Eq(path)),
@@ -212,7 +212,8 @@ TEST(SPARQLProtocolTest, parseHttpRequest) {
                               DatasetClause{Iri("<cat>"), true}}}));
   auto testAccessTokenCombinations =
       [&](const http::verb& method, std::string_view pathBase,
-          const std::variant<Query, Update, None>& expectedOperation,
+          const std::variant<Query, Update, GraphStoreOperation, None>&
+              expectedOperation,
           const ad_utility::HashMap<http::field, std::string>& headers = {},
           const std::optional<std::string>& body = std::nullopt,
           ad_utility::source_location l =
@@ -262,7 +263,8 @@ TEST(SPARQLProtocolTest, parseHttpRequest) {
                               {{http::field::content_type, UPDATE}}, "a");
   auto testAccessTokenCombinationsUrlEncoded =
       [&](const std::string& bodyBase,
-          const std::variant<Query, Update, None>& expectedOperation,
+          const std::variant<Query, Update, GraphStoreOperation, None>&
+              expectedOperation,
           ad_utility::source_location l =
               ad_utility::source_location::current()) {
         auto t = generateLocationTrace(l);
