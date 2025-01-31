@@ -4,7 +4,7 @@
 
 #include "engine/GraphStoreProtocol.h"
 
-#include "util/http/beast.h"
+#include "parser/SparqlParser.h"
 
 // ____________________________________________________________________________
 GraphOrDefault GraphStoreProtocol::extractTargetGraph(
@@ -84,18 +84,15 @@ std::vector<SparqlTripleSimpleWithGraph> GraphStoreProtocol::convertTriples(
 
 // ____________________________________________________________________________
 ParsedQuery GraphStoreProtocol::transformGet(const GraphOrDefault& graph) {
-  ParsedQuery res;
-  res._clause = parsedQuery::ConstructClause(
-      {{Variable("?s"), Variable("?p"), Variable("?o")}});
-  res._rootGraphPattern = {};
-  parsedQuery::GraphPattern selectSPO;
-  selectSPO._graphPatterns.emplace_back(parsedQuery::BasicGraphPattern{
-      {SparqlTriple(Variable("?s"), "?p", Variable("?o"))}});
+  // Construct the parsed query from its short equivalent SPARQL Update string.
+  // This is easier and also provides e.g. the `_originalString` field.
+  std::string query;
   if (const auto* iri =
           std::get_if<ad_utility::triple_component::Iri>(&graph)) {
-    res.datasetClauses_ =
-        parsedQuery::DatasetClauses::fromClauses({DatasetClause{*iri, false}});
+    query = absl::StrCat("CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ",
+                         (*iri).toStringRepresentation(), " { ?s ?p ?o } }");
+  } else {
+    query = "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }";
   }
-  res._rootGraphPattern = std::move(selectSPO);
-  return res;
+  return SparqlParser::parseQuery(query);
 }
