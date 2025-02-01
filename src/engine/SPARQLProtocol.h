@@ -224,6 +224,7 @@ class SPARQLProtocol {
       // HTTP Protocol implementation is done later.
       if (isGraphStoreOperation()) {
         checkAndSetGraphStoreOperation();
+        extractAccessTokenFromRequest();
         return parsedRequest;
       }
 

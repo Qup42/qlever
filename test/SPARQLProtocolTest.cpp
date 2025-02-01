@@ -277,6 +277,12 @@ TEST(SPARQLProtocolTest, parseHttpRequest) {
       parse(makePostRequest("/?graph=foo", TURTLE, "<foo> <bar> <baz> .")),
       ParsedRequestIs("/", {}, {{"graph", {"foo"}}},
                       GraphStoreOperation{Iri("<foo>")}));
+  EXPECT_THAT(
+      parse(makePostRequest("/?graph=foo&access-token=secret", TURTLE,
+                            "<foo> <bar> <baz> .")),
+      ParsedRequestIs("/", {"secret"},
+                      {{"graph", {"foo"}}, {"access-token", {"secret"}}},
+                      GraphStoreOperation{Iri("<foo>")}));
   auto testAccessTokenCombinations =
       [&](const http::verb& method, std::string_view pathBase,
           const std::variant<Query, Update, GraphStoreOperation, None>&
