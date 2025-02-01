@@ -42,6 +42,7 @@ TEST(SPARQLProtocolTest, parseHttpRequest) {
       "application/x-www-form-urlencoded;charset=UTF-8";
   const std::string QUERY = "application/sparql-query";
   const std::string UPDATE = "application/sparql-update";
+  const std::string TURTLE = "text/turtle";
   EXPECT_THAT(parse(makeGetRequest("/")),
               ParsedRequestIs("/", std::nullopt, {}, None{}));
   EXPECT_THAT(parse(makeGetRequest("/ping")),
@@ -52,6 +53,31 @@ TEST(SPARQLProtocolTest, parseHttpRequest) {
                   "/?query=SELECT+%2A%20WHERE%20%7B%7D&action=csv_export")),
               ParsedRequestIs("/", std::nullopt, {{"action", {"csv_export"}}},
                               Query{"SELECT * WHERE {}", {}}));
+  AD_EXPECT_THROW_WITH_MESSAGE(
+      parse(makeGetRequest("/?update=SELECT+%2A%20WHERE%20%7B%7D")),
+      testing::HasSubstr("SPARQL Update is not allowed as GET request."));
+  EXPECT_THAT(
+      parse(makeGetRequest("/?graph=%3Cfoo%3E")),
+      ParsedRequestIs("/", {}, {{"graph", {"<foo>"}}}, GraphStoreOperation{}));
+  EXPECT_THAT(
+      parse(makeGetRequest("/?default")),
+      ParsedRequestIs("/", {}, {{"default", {""}}}, GraphStoreOperation{}));
+  AD_EXPECT_THROW_WITH_MESSAGE(
+      parse(makeGetRequest("/?default&default")),
+      testing::HasSubstr("Parameter \"default\" must be "
+                         "given exactly once. Is: 2"));
+  AD_EXPECT_THROW_WITH_MESSAGE(
+      parse(makeGetRequest("/?graph=%3Cfoo%3E&graph=%3Cbar%3E")),
+      testing::HasSubstr("Parameter \"graph\" must be "
+                         "given exactly once. Is: 2"));
+  AD_EXPECT_THROW_WITH_MESSAGE(
+      parse(makeGetRequest("/?query=SELECT+%2A%20WHERE%20%7B%7D&graph=foo")),
+      testing::HasSubstr(
+          R"(Request contains parameters for both a SPARQL Query ("query") and a Graph Store Protocol operation ("graph" or "default").)"));
+  AD_EXPECT_THROW_WITH_MESSAGE(
+      parse(makeGetRequest("/?query=SELECT+%2A%20WHERE%20%7B%7D&default")),
+      testing::HasSubstr(
+          R"(Request contains parameters for both a SPARQL Query ("query") and a Graph Store Protocol operation ("graph" or "default").)"));
   EXPECT_THAT(
       parse(makePostRequest("/", URLENCODED,
                             "query=SELECT+%2A%20WHERE%20%7B%7D&send=100")),
@@ -111,12 +137,35 @@ TEST(SPARQLProtocolTest, parseHttpRequest) {
   EXPECT_THAT(
       parse(makePostRequest("/", URLENCODED, "cmd=clear-cache")),
       ParsedRequestIs("/", std::nullopt, {{"cmd", {"clear-cache"}}}, None{}));
+  AD_EXPECT_THROW_WITH_MESSAGE(
+      parse(makePostRequest("/", URLENCODED, "query=a&update=b")),
+      testing::HasSubstr(
+          R"(Request must only contain one of "query" and "update".)"));
+  AD_EXPECT_THROW_WITH_MESSAGE(
+      parse(makePostRequest("/", URLENCODED, "graph=foo")),
+      testing::HasSubstr(absl::StrCat("Unsupported Content type \"", URLENCODED,
+                                      "\" for "
+                                      "Graph Store protocol.")));
+  AD_EXPECT_THROW_WITH_MESSAGE(
+      parse(makePostRequest("/", URLENCODED, "default")),
+      testing::HasSubstr(absl::StrCat("Unsupported Content type \"", URLENCODED,
+                                      "\" for Graph Store protocol.")));
   EXPECT_THAT(
       parse(makePostRequest("/", QUERY, "SELECT * WHERE {}")),
       ParsedRequestIs("/", std::nullopt, {}, Query{"SELECT * WHERE {}", {}}));
   EXPECT_THAT(parse(makePostRequest("/?send=100", QUERY, "SELECT * WHERE {}")),
               ParsedRequestIs("/", std::nullopt, {{"send", {"100"}}},
                               Query{"SELECT * WHERE {}", {}}));
+  AD_EXPECT_THROW_WITH_MESSAGE(
+      parse(makePostRequest("/?graph=foo", QUERY, "")),
+      testing::HasSubstr(
+          "Unsupported Content type \"application/sparql-query\" for "
+          "Graph Store protocol."));
+  AD_EXPECT_THROW_WITH_MESSAGE(
+      parse(makePostRequest("/?default", QUERY, "")),
+      testing::HasSubstr(
+          "Unsupported Content type \"application/sparql-query\" for "
+          "Graph Store protocol."));
   AD_EXPECT_THROW_WITH_MESSAGE(
       parse(makeRequest(http::verb::patch, "/")),
       testing::StrEq(
@@ -133,6 +182,16 @@ TEST(SPARQLProtocolTest, parseHttpRequest) {
   EXPECT_THAT(
       parse(makePostRequest("/", UPDATE, "DELETE * WHERE {}")),
       ParsedRequestIs("/", std::nullopt, {}, Update{"DELETE * WHERE {}", {}}));
+  AD_EXPECT_THROW_WITH_MESSAGE(
+      parse(makePostRequest("/?graph=foo", UPDATE, "")),
+      testing::HasSubstr(
+          "Unsupported Content type \"application/sparql-update\" for "
+          "Graph Store protocol."));
+  AD_EXPECT_THROW_WITH_MESSAGE(
+      parse(makePostRequest("/?default", UPDATE, "")),
+      testing::HasSubstr(
+          "Unsupported Content type \"application/sparql-update\" for "
+          "Graph Store protocol."));
   EXPECT_THAT(
       parse(makePostRequest("/", URLENCODED,
                             "update=DELETE%20%2A%20WHERE%20%7B%7D")),
@@ -210,6 +269,13 @@ TEST(SPARQLProtocolTest, parseHttpRequest) {
                       Update{"INSERT DATA {}",
                              {DatasetClause{Iri("<baz>"), false},
                               DatasetClause{Iri("<cat>"), true}}}));
+  EXPECT_THAT(
+      parse(makePostRequest("/?default", TURTLE, "<foo> <bar> <baz> .")),
+      ParsedRequestIs("/", {}, {{"default", {""}}}, GraphStoreOperation{}));
+  EXPECT_THAT(
+      parse(
+          makePostRequest("/?graph=%3Cfoo%3E", TURTLE, "<foo> <bar> <baz> .")),
+      ParsedRequestIs("/", {}, {{"graph", {"<foo>"}}}, GraphStoreOperation{}));
   auto testAccessTokenCombinations =
       [&](const http::verb& method, std::string_view pathBase,
           const std::variant<Query, Update, GraphStoreOperation, None>&
