@@ -394,10 +394,11 @@ Awaitable<void> Server::process(
   };
   auto visitGraphStore =
       [&send, &request, &checkParameter, &accessTokenOk, &parameters,
-       &requireValidAccessToken, this,
-       &requestTimer](const GraphStoreOperation&) -> Awaitable<void> {
+       &requireValidAccessToken, this, &requestTimer](
+          const GraphStoreOperation& graphStoreOperation) -> Awaitable<void> {
     ParsedQuery parsedOperation =
-        GraphStoreProtocol::transformGraphStoreProtocol(request);
+        GraphStoreProtocol::transformGraphStoreProtocol(graphStoreOperation,
+                                                        request);
     if (auto timeLimit = co_await verifyUserSubmittedQueryTimeout(
             checkParameter("timeout", std::nullopt), accessTokenOk, request,
             send)) {

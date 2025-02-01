@@ -6,13 +6,13 @@
 
 #include "util/Algorithm.h"
 #include "util/TypeIdentity.h"
-#include "util/TypeTraits.h"
 #include "util/http/HttpUtils.h"
 #include "util/http/UrlParser.h"
 #include "util/http/beast.h"
 
 class SPARQLProtocol {
   FRIEND_TEST(SPARQLProtocolTest, extractAccessToken);
+  FRIEND_TEST(SPARQLProtocolTest, extractTargetGraph);
 
  public:
   /// Parse the path and URL parameters from the given request. Supports both
@@ -83,7 +83,12 @@ class SPARQLProtocol {
       }
       AD_CORRECTNESS_CHECK(
           std::holds_alternative<None>(parsedRequest.operation_));
-      parsedRequest.operation_ = GraphStoreOperation{};
+      // We only support passing the target graph as a query parameter
+      // (`Indirect Graph Identification`). `Direct Graph Identification` (the
+      // URL is the graph) is not supported. See also
+      // https://www.w3.org/TR/2013/REC-sparql11-http-rdf-update-20130321/#graph-identification.
+      parsedRequest.operation_ =
+          GraphStoreOperation{extractTargetGraph(parsedRequest.parameters_)};
     };
     auto isGraphStoreOperation = [&isContainedExactlyOnce] {
       return isContainedExactlyOnce("graph") ||
@@ -267,4 +272,10 @@ class SPARQLProtocol {
                ? std::move(tokenFromAuthorizationHeader)
                : std::move(tokenFromParameter);
   };
+
+  // Extract the graph to be acted upon using from the URL query parameters
+  // (`Indirect Graph Identification`). See
+  // https://www.w3.org/TR/2013/REC-sparql11-http-rdf-update-20130321/#indirect-graph-identification
+  static GraphOrDefault extractTargetGraph(
+      const ad_utility::url_parser::ParamValueMap& params);
 };
