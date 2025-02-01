@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 
+#include "parser/data/GraphRef.h"
 #include "parser/sparqlParser/DatasetClause.h"
 #include "util/HashMap.h"
 
@@ -64,9 +65,9 @@ struct Update {
   bool operator==(const Update& rhs) const = default;
 };
 
-// A Graph Store HTTP Protocol operation. For Graph Store Operations this only
-// indicates the type of the operation. All data is parsed later.
+// A Graph Store HTTP Protocol operation.
 struct GraphStoreOperation {
+  GraphOrDefault graph_;
   bool operator==(const GraphStoreOperation& rhs) const = default;
 };
 

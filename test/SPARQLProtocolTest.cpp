@@ -8,6 +8,7 @@
 
 #include <boost/beast/http.hpp>
 
+#include "./util/TripleComponentTestHelpers.h"
 #include "util/GTestHelpers.h"
 #include "util/HttpRequestHelpers.h"
 #include "util/http/HttpUtils.h"
@@ -35,6 +36,7 @@ auto ParsedRequestIs =
 }  // namespace
 
 TEST(SPARQLProtocolTest, parseHttpRequest) {
+  auto Iri = ad_utility::triple_component::Iri::fromIriref;
   auto parse = [](const ad_utility::httpUtils::HttpRequest auto& request) {
     return SPARQLProtocol::parseHttpRequest(request);
   };
@@ -56,20 +58,19 @@ TEST(SPARQLProtocolTest, parseHttpRequest) {
   AD_EXPECT_THROW_WITH_MESSAGE(
       parse(makeGetRequest("/?update=SELECT+%2A%20WHERE%20%7B%7D")),
       testing::HasSubstr("SPARQL Update is not allowed as GET request."));
-  EXPECT_THAT(
-      parse(makeGetRequest("/?graph=%3Cfoo%3E")),
-      ParsedRequestIs("/", {}, {{"graph", {"<foo>"}}}, GraphStoreOperation{}));
-  EXPECT_THAT(
-      parse(makeGetRequest("/?default")),
-      ParsedRequestIs("/", {}, {{"default", {""}}}, GraphStoreOperation{}));
+  EXPECT_THAT(parse(makeGetRequest("/?graph=foo")),
+              ParsedRequestIs("/", {}, {{"graph", {"foo"}}},
+                              GraphStoreOperation{Iri("<foo>")}));
+  EXPECT_THAT(parse(makeGetRequest("/?default")),
+              ParsedRequestIs("/", {}, {{"default", {""}}},
+                              GraphStoreOperation{DEFAULT{}}));
   AD_EXPECT_THROW_WITH_MESSAGE(
       parse(makeGetRequest("/?default&default")),
       testing::HasSubstr("Parameter \"default\" must be "
                          "given exactly once. Is: 2"));
-  AD_EXPECT_THROW_WITH_MESSAGE(
-      parse(makeGetRequest("/?graph=%3Cfoo%3E&graph=%3Cbar%3E")),
-      testing::HasSubstr("Parameter \"graph\" must be "
-                         "given exactly once. Is: 2"));
+  AD_EXPECT_THROW_WITH_MESSAGE(parse(makeGetRequest("/?graph=foo&graph=bar")),
+                               testing::HasSubstr("Parameter \"graph\" must be "
+                                                  "given exactly once. Is: 2"));
   AD_EXPECT_THROW_WITH_MESSAGE(
       parse(makeGetRequest("/?query=SELECT+%2A%20WHERE%20%7B%7D&graph=foo")),
       testing::HasSubstr(
@@ -113,7 +114,6 @@ TEST(SPARQLProtocolTest, parseHttpRequest) {
       parse(makePostRequest("/", URLENCODED,
                             "query=SELECT%20%2A%20WHERE%20%7B%7D")),
       ParsedRequestIs("/", std::nullopt, {}, Query{"SELECT * WHERE {}", {}}));
-  auto Iri = ad_utility::triple_component::Iri::fromIriref;
   EXPECT_THAT(
       parse(makePostRequest(
           "/", URLENCODED,
@@ -271,11 +271,12 @@ TEST(SPARQLProtocolTest, parseHttpRequest) {
                               DatasetClause{Iri("<cat>"), true}}}));
   EXPECT_THAT(
       parse(makePostRequest("/?default", TURTLE, "<foo> <bar> <baz> .")),
-      ParsedRequestIs("/", {}, {{"default", {""}}}, GraphStoreOperation{}));
+      ParsedRequestIs("/", {}, {{"default", {""}}},
+                      GraphStoreOperation{DEFAULT{}}));
   EXPECT_THAT(
-      parse(
-          makePostRequest("/?graph=%3Cfoo%3E", TURTLE, "<foo> <bar> <baz> .")),
-      ParsedRequestIs("/", {}, {{"graph", {"<foo>"}}}, GraphStoreOperation{}));
+      parse(makePostRequest("/?graph=foo", TURTLE, "<foo> <bar> <baz> .")),
+      ParsedRequestIs("/", {}, {{"graph", {"foo"}}},
+                      GraphStoreOperation{Iri("<foo>")}));
   auto testAccessTokenCombinations =
       [&](const http::verb& method, std::string_view pathBase,
           const std::variant<Query, Update, GraphStoreOperation, None>&
@@ -383,6 +384,7 @@ TEST(SPARQLProtocolTest, parseHttpRequest) {
                                         Update{"DELETE WHERE {}", {}});
 }
 
+// _____________________________________________________________________________________________
 TEST(SPARQLProtocolTest, extractAccessToken) {
   auto extract = [](const ad_utility::httpUtils::HttpRequest auto& request) {
     auto parsedUrl = parseRequestTarget(request.target());
@@ -425,4 +427,32 @@ TEST(SPARQLProtocolTest, extractAccessToken) {
                           {{http::field::authorization, "foo"}})),
       testing::HasSubstr(
           "Authorization header doesn't start with \"Bearer \"."));
+}
+
+// _____________________________________________________________________________________________
+TEST(SPARQLProtocolTest, extractTargetGraph) {
+  const auto extractTargetGraph = SPARQLProtocol::extractTargetGraph;
+  // Equivalent to `/?default`
+  EXPECT_THAT(extractTargetGraph({{"default", {""}}}), DEFAULT{});
+  // Equivalent to `/?graph=foo`
+  EXPECT_THAT(extractTargetGraph({{"graph", {"foo"}}}), iri("<foo>"));
+  // Equivalent to `/?graph=foo&graph=bar`
+  AD_EXPECT_THROW_WITH_MESSAGE(
+      extractTargetGraph({{"graph", {"foo", "bar"}}}),
+      testing::HasSubstr(
+          "Parameter \"graph\" must be given exactly once. Is: 2"));
+  const std::string eitherDefaultOrGraphErrorMsg =
+      "Exactly one of the query parameters default or graph must be set to "
+      "identify the graph for the graph store protocol request.";
+  // Equivalent to `/` or `/?`
+  AD_EXPECT_THROW_WITH_MESSAGE(
+      extractTargetGraph({}), testing::HasSubstr(eitherDefaultOrGraphErrorMsg));
+  // Equivalent to `/?unrelated=a&unrelated=b`
+  AD_EXPECT_THROW_WITH_MESSAGE(
+      extractTargetGraph({{"unrelated", {"a", "b"}}}),
+      testing::HasSubstr(eitherDefaultOrGraphErrorMsg));
+  // Equivalent to `/?default&graph=foo`
+  AD_EXPECT_THROW_WITH_MESSAGE(
+      extractTargetGraph({{"default", {""}}, {"graph", {"foo"}}}),
+      testing::HasSubstr(eitherDefaultOrGraphErrorMsg));
 }
