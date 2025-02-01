@@ -394,14 +394,15 @@ Awaitable<void> Server::process(
   };
   auto visitGraphStore =
       [&send, &request, &checkParameter, &accessTokenOk, &parameters,
-       &requireValidAccessToken, this, &requestTimer](
-          const ad_utility::url_parser::sparqlOperation::GraphStoreOperation&)
-      -> Awaitable<void> {
+       &requireValidAccessToken, this,
+       &requestTimer](const GraphStoreOperation&) -> Awaitable<void> {
     ParsedQuery parsedOperation =
         GraphStoreProtocol::transformGraphStoreProtocol(request);
     if (auto timeLimit = co_await verifyUserSubmittedQueryTimeout(
             checkParameter("timeout", std::nullopt), accessTokenOk, request,
             send)) {
+      // An empty operation string means that a random ID is generated for the
+      // query.
       ad_utility::websocket::MessageSender messageSender =
           createMessageSender(queryHub_, request, "");
       auto [qec, cancellationHandle, cancelTimeoutOnDestruction] =
@@ -508,7 +509,7 @@ ParsedQuery Server::parseOperation(const Operation& operation) {
 auto Server::prepareExecutionContext(
     ad_utility::websocket::MessageSender& messageSender,
     const ad_utility::url_parser::ParamValueMap& params,
-    std::string_view operationName, std::string_view operationSPARQL,
+    std::string_view operationType, std::string_view operationSPARQL,
     TimeLimit timeLimit) {
   auto [cancellationHandle, cancelTimeoutOnDestruction] =
       setupCancellationHandle(messageSender.getQueryId(), timeLimit);
@@ -516,7 +517,7 @@ auto Server::prepareExecutionContext(
   // Do the query planning. This creates a `QueryExecutionTree`, which will
   // then be used to process the query.
   auto [pinSubtrees, pinResult] = determineResultPinning(params);
-  LOG(INFO) << "Processing the following " << operationName << ":"
+  LOG(INFO) << "Processing the following " << operationType << ":"
             << (pinResult ? " [pin result]" : "")
             << (pinSubtrees ? " [pin subresults]" : "") << "\n"
             << operationSPARQL << std::endl;

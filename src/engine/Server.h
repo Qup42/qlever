@@ -185,10 +185,11 @@ class Server {
   //  Parse an operation
   template <QueryOrUpdate Operation, string Operation::*opFieldString>
   ParsedQuery parseOperation(const Operation& operation);
+  // Creates a query execution context
   auto prepareExecutionContext(
       ad_utility::websocket::MessageSender& messageSender,
       const ad_utility::url_parser::ParamValueMap& params,
-      std::string_view operationName, std::string_view operationSPARQL,
+      std::string_view operationType, std::string_view operationSPARQL,
       TimeLimit timeLimit);
   // Plan a parsed query.
   Awaitable<PlannedQuery> planQuery(net::static_thread_pool& thread_pool,

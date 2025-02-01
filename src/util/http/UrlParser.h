@@ -64,7 +64,8 @@ struct Update {
   bool operator==(const Update& rhs) const = default;
 };
 
-// A Graph Store HTTP Protocol operation
+// A Graph Store HTTP Protocol operation. For Graph Store Operations this only
+// indicates the type of the operation. All data is parsed later.
 struct GraphStoreOperation {
   bool operator==(const GraphStoreOperation& rhs) const = default;
 };
