@@ -176,11 +176,15 @@ class Server {
   static std::pair<bool, bool> determineResultPinning(
       const ad_utility::url_parser::ParamValueMap& params);
   FRIEND_TEST(ServerTest, determineResultPinning);
-  template <typename Operation>
   // Parse an operation (Query or Update).
-  auto parseOperation(ad_utility::websocket::MessageSender& messageSender,
-                      const ad_utility::url_parser::ParamValueMap& params,
-                      const Operation& operation, TimeLimit timeLimit);
+  template <typename Operation>
+  ParsedQuery parseOperation(const Operation& operation);
+  // Creates a query execution context
+  auto prepareExecutionContext(
+      ad_utility::websocket::MessageSender& messageSender,
+      const ad_utility::url_parser::ParamValueMap& params,
+      std::string_view operationType, std::string_view operationSPARQL,
+      TimeLimit timeLimit);
   // Sets up the PlannedQuery s.t. it is ready to be executed.
   static PlannedQuery setupPlannedQuery(PlannedQuery& plannedOperation,
                                         SharedCancellationHandle handle,
@@ -197,7 +201,7 @@ class Server {
   ad_utility::websocket::MessageSender createMessageSender(
       const std::weak_ptr<ad_utility::websocket::QueryHub>& queryHub,
       const ad_utility::httpUtils::HttpRequest auto& request,
-      const string& operation);
+      std::string_view operation);
   // Execute an update operation. The function must have exclusive access to the
   // DeltaTriples object.
   json processUpdateImpl(
