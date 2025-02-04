@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 
+#include "parser/data/GraphRef.h"
 #include "parser/sparqlParser/DatasetClause.h"
 #include "util/HashMap.h"
 
@@ -44,7 +45,9 @@ struct ParsedUrl {
   ParamValueMap parameters_;
 };
 
-// The different SPARQL operations that a `ParsedRequest` can represent.
+// The different SPARQL operations that a `ParsedRequest` can represent. The
+// operations represent the detected operation type and can contain additional
+// that the operation needs.
 namespace sparqlOperation {
 // A SPARQL 1.1 Query
 struct Query {
@@ -60,6 +63,12 @@ struct Update {
   std::vector<DatasetClause> datasetClauses_;
 
   bool operator==(const Update& rhs) const = default;
+};
+
+// A Graph Store HTTP Protocol operation.
+struct GraphStoreOperation {
+  GraphOrDefault graph_;
+  bool operator==(const GraphStoreOperation& rhs) const = default;
 };
 
 // No operation. This can happen for QLever's custom operations (e.g.
@@ -79,7 +88,7 @@ struct ParsedRequest {
   std::optional<std::string> accessToken_;
   ParamValueMap parameters_;
   std::variant<sparqlOperation::Query, sparqlOperation::Update,
-               sparqlOperation::None>
+               sparqlOperation::GraphStoreOperation, sparqlOperation::None>
       operation_;
 };
 

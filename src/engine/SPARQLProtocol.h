@@ -6,13 +6,13 @@
 
 #include "util/Algorithm.h"
 #include "util/TypeIdentity.h"
-#include "util/TypeTraits.h"
 #include "util/http/HttpUtils.h"
 #include "util/http/UrlParser.h"
 #include "util/http/beast.h"
 
 class SPARQLProtocol {
   FRIEND_TEST(SPARQLProtocolTest, extractAccessToken);
+  FRIEND_TEST(SPARQLProtocolTest, extractTargetGraph);
 
  public:
   /// Parse the path and URL parameters from the given request. Supports both
@@ -39,6 +39,8 @@ class SPARQLProtocol {
       auto operation = ad_utility::url_parser::getParameterCheckAtMostOnce(
           parsedRequest.parameters_, paramName);
       if (operation.has_value()) {
+        AD_CORRECTNESS_CHECK(
+            std::holds_alternative<None>(parsedRequest.operation_));
         parsedRequest.operation_ = Operation{operation.value(), {}};
         parsedRequest.parameters_.erase(paramName);
       }
@@ -65,15 +67,66 @@ class SPARQLProtocol {
       parsedRequest.accessToken_ =
           extractAccessToken(request, parsedRequest.parameters_);
     };
+    auto isContainedExactlyOnce = [&parsedRequest](const std::string& key) {
+      return ad_utility::url_parser::getParameterCheckAtMostOnce(
+                 parsedRequest.parameters_, key)
+          .has_value();
+    };
+    auto checkAndSetGraphStoreOperation = [&parsedRequest,
+                                           &isContainedExactlyOnce] {
+      // SPARQL Graph Store HTTP Protocol with indirect graph identification
+      if (isContainedExactlyOnce("graph") &&
+          isContainedExactlyOnce("default")) {
+        throw std::runtime_error(
+            "Parameters \"graph\" and \"default\" must "
+            "not be set at the same time.");
+      }
+      AD_CORRECTNESS_CHECK(
+          std::holds_alternative<None>(parsedRequest.operation_));
+      // We only support passing the target graph as a query parameter
+      // (`Indirect Graph Identification`). `Direct Graph Identification` (the
+      // URL is the graph) is not supported. See also
+      // https://www.w3.org/TR/2013/REC-sparql11-http-rdf-update-20130321/#graph-identification.
+      parsedRequest.operation_ =
+          GraphStoreOperation{extractTargetGraph(parsedRequest.parameters_)};
+    };
+    auto isGraphStoreOperation = [&isContainedExactlyOnce] {
+      return isContainedExactlyOnce("graph") ||
+             isContainedExactlyOnce("default");
+    };
+    // Check that requests don't both have these content types and are Graph
+    // Store operations.
+    auto checkUnsupportedGraphStoreContentType =
+        [&isGraphStoreOperation](std::string_view contentType,
+                                 std::string_view unsupportedType) {
+          if (isGraphStoreOperation()) {
+            if (contentType.starts_with(unsupportedType)) {
+              throw std::runtime_error(
+                  absl::StrCat("Unsupported Content type \"", contentType,
+                               "\" for Graph Store protocol."));
+            }
+          }
+        };
 
     if (request.method() == http::verb::get) {
-      setOperationIfSpecifiedInParams(ti<Query>, "query");
-      addDatasetClauses();
-      extractAccessTokenFromRequest();
-
       if (parsedRequest.parameters_.contains("update")) {
         throw std::runtime_error(
             "SPARQL Update is not allowed as GET request.");
+      }
+      if (isGraphStoreOperation() &&
+          parsedRequest.parameters_.contains("query")) {
+        throw std::runtime_error(
+            R"(Request contains parameters for both a SPARQL Query ("query") and a Graph Store Protocol operation ("graph" or "default").)");
+      }
+      if (isGraphStoreOperation()) {
+        // SPARQL Graph Store HTTP Protocol with indirect graph identification
+        checkAndSetGraphStoreOperation();
+      }
+      if (isContainedExactlyOnce("query")) {
+        // SPARQL Query
+        setOperationIfSpecifiedInParams(ti<Query>, "query");
+        addDatasetClauses();
+        extractAccessTokenFromRequest();
       }
       return parsedRequest;
     }
@@ -134,6 +187,8 @@ class SPARQLProtocol {
         parsedRequest.parameters_ =
             ad_utility::url_parser::paramsToMap(query->params());
 
+        checkUnsupportedGraphStoreContentType(contentType,
+                                              contentTypeUrlEncoded);
         if (parsedRequest.parameters_.contains("query") &&
             parsedRequest.parameters_.contains("update")) {
           throw std::runtime_error(
@@ -150,17 +205,29 @@ class SPARQLProtocol {
         return parsedRequest;
       }
       if (contentType.starts_with(contentTypeSparqlQuery)) {
+        checkUnsupportedGraphStoreContentType(contentType,
+                                              contentTypeSparqlQuery);
         parsedRequest.operation_ = Query{request.body(), {}};
         addDatasetClauses();
         extractAccessTokenFromRequest();
         return parsedRequest;
       }
       if (contentType.starts_with(contentTypeSparqlUpdate)) {
+        checkUnsupportedGraphStoreContentType(contentType,
+                                              contentTypeSparqlUpdate);
         parsedRequest.operation_ = Update{request.body(), {}};
         addDatasetClauses();
         extractAccessTokenFromRequest();
         return parsedRequest;
       }
+      // Checking if the content type is supported by the Graph Store
+      // HTTP Protocol implementation is done later.
+      if (isGraphStoreOperation()) {
+        checkAndSetGraphStoreOperation();
+        extractAccessTokenFromRequest();
+        return parsedRequest;
+      }
+
       throw std::runtime_error(absl::StrCat(
           "POST request with content type \"", contentType,
           "\" not supported (must be \"", contentTypeUrlEncoded, "\", \"",
@@ -206,4 +273,10 @@ class SPARQLProtocol {
                ? std::move(tokenFromAuthorizationHeader)
                : std::move(tokenFromParameter);
   };
+
+  // Extract the graph to be acted upon using from the URL query parameters
+  // (`Indirect Graph Identification`). See
+  // https://www.w3.org/TR/2013/REC-sparql11-http-rdf-update-20130321/#indirect-graph-identification
+  static GraphOrDefault extractTargetGraph(
+      const ad_utility::url_parser::ParamValueMap& params);
 };
