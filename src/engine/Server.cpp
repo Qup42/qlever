@@ -427,7 +427,8 @@ CPP_template_2(typename RequestT, typename ResponseT)(
   auto visitOperation =
       [&checkParameter, &accessTokenOk, &request, &send, &parameters,
        &requestTimer,
-       this](ParsedQuery parsedOperation, std::string operationName,
+       this](std::vector<ParsedQuery> parsedOperation,
+             std::string operationName, std::string_view operationString,
              std::function<bool(const ParsedQuery&)> expectedOperation,
              const std::string msg) -> Awaitable<void> {
     auto timeLimit = co_await verifyUserSubmittedQueryTimeout(
@@ -437,45 +438,53 @@ CPP_template_2(typename RequestT, typename ResponseT)(
       // sent to the client already. We can stop here.
       co_return;
     }
-    ad_utility::websocket::MessageSender messageSender = createMessageSender(
-        queryHub_, request, parsedOperation._originalString);
+    ad_utility::websocket::MessageSender messageSender =
+        createMessageSender(queryHub_, request, operationString);
 
     auto [qec, cancellationHandle, cancelTimeoutOnDestruction] =
-        prepareOperation(operationName, parsedOperation._originalString,
-                         messageSender, parameters, timeLimit.value());
-    if (!expectedOperation(parsedOperation)) {
-      throw std::runtime_error(
-          absl::StrCat(msg, ad_utility::truncateOperationString(
-                                parsedOperation._originalString)));
+        prepareOperation(operationName, operationString, messageSender,
+                         parameters, timeLimit.value());
+    if (!ql::ranges::all_of(parsedOperation, expectedOperation)) {
+      throw std::runtime_error(absl::StrCat(
+          msg, ad_utility::truncateOperationString(operationString)));
     }
-    if (parsedOperation.hasUpdateClause()) {
+    if (ql::ranges::all_of(parsedOperation,
+                           std::mem_fn(&ParsedQuery::hasUpdateClause))) {
       co_return co_await processUpdate(
           std::move(parsedOperation), requestTimer, cancellationHandle, qec,
           std::move(request), send, timeLimit.value());
     } else {
-      AD_CORRECTNESS_CHECK(parsedOperation.hasSelectClause() ||
-                           parsedOperation.hasAskClause() ||
-                           parsedOperation.hasConstructClause());
+      AD_CORRECTNESS_CHECK(parsedOperation.size() == 1);
+      AD_CORRECTNESS_CHECK(
+          ql::ranges::all_of(parsedOperation,
+                             std::mem_fn(&ParsedQuery::hasSelectClause)) ||
+          ql::ranges::all_of(parsedOperation,
+                             std::mem_fn(&ParsedQuery::hasAskClause)) ||
+          ql::ranges::all_of(parsedOperation,
+                             std::mem_fn(&ParsedQuery::hasConstructClause)));
       co_return co_await processQuery(
-          parameters, std::move(parsedOperation), requestTimer,
+          parameters, std::move(parsedOperation[0]), requestTimer,
           cancellationHandle, qec, std::move(request), send, timeLimit.value());
     }
   };
   auto visitQuery = [&visitOperation](Query query) -> Awaitable<void> {
     auto parsedQuery = SparqlParser::parseQuery(std::move(query.query_),
                                                 query.datasetClauses_);
+    AD_CORRECTNESS_CHECK(parsedQuery.size() == 1);
     return visitOperation(
-        parsedQuery, "SPARQL Query", std::not_fn(&ParsedQuery::hasUpdateClause),
+        parsedQuery, "SPARQL Query", parsedQuery.front()._originalString,
+        std::not_fn(&ParsedQuery::hasUpdateClause),
         "SPARQL QUERY was request via the HTTP request, but the "
         "following update was sent instead of an query: ");
   };
   auto visitUpdate = [&visitOperation, &requireValidAccessToken](
                          Update update) -> Awaitable<void> {
     requireValidAccessToken("SPARQL Update");
-    auto parsedUpdate = SparqlParser::parseQuery(std::move(update.update_),
-                                                 update.datasetClauses_);
+    auto parsedUpdate =
+        SparqlParser::parseQuery(update.update_, update.datasetClauses_);
     return visitOperation(
-        parsedUpdate, "SPARQL Update", &ParsedQuery::hasUpdateClause,
+        parsedUpdate, "SPARQL Update", update.update_,
+        &ParsedQuery::hasUpdateClause,
         "SPARQL UPDATE was request via the HTTP request, but the "
         "following query was sent instead of an update: ");
   };
@@ -494,9 +503,9 @@ CPP_template_2(typename RequestT, typename ResponseT)(
     auto trueFunc = [](const ParsedQuery&) { return true; };
     std::string_view queryType =
         parsedOperation.hasUpdateClause() ? "Update" : "Query";
-    return visitOperation(parsedOperation,
-                          absl::StrCat("Graph Store (", queryType, ")"),
-                          trueFunc, "Unused dummy message");
+    return visitOperation(
+        {parsedOperation}, absl::StrCat("Graph Store (", queryType, ")"),
+        parsedOperation._originalString, trueFunc, "Unused dummy message");
   };
   auto visitNone = [&response, &send, &request](None) -> Awaitable<void> {
     // If there was no "query", but any of the URL parameters processed before
@@ -747,7 +756,7 @@ CPP_template_2(typename RequestT)(
     requires ad_utility::httpUtils::HttpRequest<RequestT>)
     ad_utility::websocket::MessageSender Server::createMessageSender(
         const std::weak_ptr<ad_utility::websocket::QueryHub>& queryHub,
-        const RequestT& request, const string& operation) {
+        const RequestT& request, std::string_view operation) {
   auto queryHubLock = queryHub.lock();
   AD_CORRECTNESS_CHECK(queryHubLock);
   ad_utility::websocket::MessageSender messageSender{
@@ -912,25 +921,35 @@ json Server::processUpdateImpl(
 CPP_template_2(typename RequestT, typename ResponseT)(
     requires ad_utility::httpUtils::HttpRequest<RequestT>)
     Awaitable<void> Server::processUpdate(
-        ParsedQuery&& update, const ad_utility::Timer& requestTimer,
+        std::vector<ParsedQuery>&& updates,
+        const ad_utility::Timer& requestTimer,
         ad_utility::SharedCancellationHandle cancellationHandle,
         QueryExecutionContext& qec, const RequestT& request, ResponseT&& send,
         TimeLimit timeLimit) {
-  AD_CORRECTNESS_CHECK(update.hasUpdateClause());
-  PlannedQuery plannedQuery =
-      co_await planQuery(updateThreadPool_, std::move(update), requestTimer,
-                         timeLimit, qec, cancellationHandle);
+  AD_CORRECTNESS_CHECK(ql::ranges::all_of(
+      updates, [](const ParsedQuery& p) { return p.hasUpdateClause(); }));
+  std::vector<PlannedQuery> plannedUpdates;
+  for (ParsedQuery update : std::move(updates)) {
+    plannedUpdates.push_back(
+        co_await planQuery(updateThreadPool_, std::move(update), requestTimer,
+                           timeLimit, qec, cancellationHandle));
+  }
   auto coroutine = computeInNewThread(
       updateThreadPool_,
-      [this, &requestTimer, &cancellationHandle, &plannedQuery]() {
+      [this, &requestTimer, &cancellationHandle, &plannedUpdates]() {
         // Update the delta triples.
         return index_.deltaTriplesManager().modify<nlohmann::json>(
             [this, &requestTimer, &cancellationHandle,
-             &plannedQuery](auto& deltaTriples) {
-              // Use `this` explicitly to silence false-positive errors on
-              // captured `this` being unused.
-              return this->processUpdateImpl(plannedQuery, requestTimer,
-                                             cancellationHandle, deltaTriples);
+             &plannedUpdates](auto& deltaTriples) {
+              json results = json::array();
+              for (const auto& plannedUpdate : plannedUpdates) {
+                // Use `this` explicitly to silence false-positive errors on
+                // captured `this` being unused.
+                results.push_back(
+                    this->processUpdateImpl(plannedUpdate, requestTimer,
+                                            cancellationHandle, deltaTriples));
+              }
+              return results;
             });
       },
       cancellationHandle);
