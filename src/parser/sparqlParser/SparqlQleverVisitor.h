@@ -206,21 +206,23 @@ class SparqlQleverVisitor {
 
   std::vector<ParsedQuery> visit(Parser::UpdateContext* ctx);
 
-  ParsedQuery visit(Parser::Update1Context* ctx);
+  std::vector<ParsedQuery> visit(Parser::Update1Context* ctx);
 
   updateClause::Load visit(Parser::LoadContext* ctx);
 
-  updateClause::Clear visit(Parser::ClearContext* ctx);
+  ParsedQuery visit(Parser::ClearContext* ctx);
 
-  updateClause::Drop visit(Parser::DropContext* ctx);
+  ParsedQuery visit(Parser::DropContext* ctx);
 
-  updateClause::Create visit(Parser::CreateContext* ctx);
+  std::vector<ParsedQuery> visit(Parser::CreateContext* ctx);
 
-  updateClause::Add visit(Parser::AddContext* ctx);
+  // Although only 0 or 1 ParsedQuery are ever returned, the vector makes the
+  // interface much simpler.
+  std::vector<ParsedQuery> visit(Parser::AddContext* ctx);
 
-  updateClause::Move visit(Parser::MoveContext* ctx);
+  std::vector<ParsedQuery> visit(Parser::MoveContext* ctx);
 
-  updateClause::Copy visit(Parser::CopyContext* ctx);
+  std::vector<ParsedQuery> visit(Parser::CopyContext* ctx);
 
   updateClause::GraphUpdate visit(Parser::InsertDataContext* ctx);
 
@@ -633,6 +635,16 @@ class SparqlQleverVisitor {
   // planner.
   static parsedQuery::BasicGraphPattern toGraphPattern(
       const ad_utility::sparql_types::Triples& triples);
+
+ public:
+  static SparqlTripleSimpleWithGraph makeAllTripleTemplatee(
+      const GraphRefAll& graph);
+
+ private:
+  ParsedQuery makeClear(const GraphRefAll& graph);
+  ParsedQuery makeClear(const GraphOrDefault& graph);
+  ParsedQuery makeCopyAll(const GraphOrDefault& source,
+                          const GraphOrDefault& target);
 
   FRIEND_TEST(SparqlParser, ensureExceptionOnInvalidGraphTerm);
 };
