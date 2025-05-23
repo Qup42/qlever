@@ -586,16 +586,19 @@ std::vector<ParsedQuery> Visitor::visit(Parser::UpdateContext* ctx) {
     // state of the visitor. The standard mentions that prefixes are shared
     // between consecutive updates.
     visit(ctx->prologue(i));
-    auto thisUpdate = visit(ctx->update1(i));
+    auto thisUpdates = visit(ctx->update1(i));
     // The string representation of the Update is from the beginning of that
     // updates prologue to the end of the update. The `;` between queries is
     // ignored in the string representation.
     const size_t updateStartPos = ctx->prologue(i)->getStart()->getStartIndex();
     const size_t updateEndPos = ctx->update1(i)->getStop()->getStopIndex();
-    thisUpdate._originalString = std::string{ad_utility::getUTF8Substring(
+    std::string updateStringRepr = std::string{ad_utility::getUTF8Substring(
         ctx->getStart()->getInputStream()->toString(), updateStartPos,
         updateEndPos - updateStartPos + 1)};
-    updates.push_back(std::move(thisUpdate));
+    ql::ranges::for_each(thisUpdates, [updateStringRepr](ParsedQuery& update) {
+      update._originalString = updateStringRepr;
+    });
+    ad_utility::appendVector(updates, thisUpdates);
     resetStateForMultipleUpdates();
   }
 
@@ -603,60 +606,216 @@ std::vector<ParsedQuery> Visitor::visit(Parser::UpdateContext* ctx) {
 }
 
 // ____________________________________________________________________________________
-ParsedQuery Visitor::visit(Parser::Update1Context* ctx) {
-  if (ctx->deleteWhere() || ctx->modify()) {
-    return visitAlternative<ParsedQuery>(ctx->deleteWhere(), ctx->modify());
+std::vector<ParsedQuery> Visitor::visit(Parser::Update1Context* ctx) {
+  using Updates = std::vector<ParsedQuery>;
+  if (ctx->deleteWhere() || ctx->modify() || ctx->clear() || ctx->drop() ||
+      ctx->create() || ctx->copy() || ctx->move() || ctx->add()) {
+    return visitAlternative<Updates>(ctx->deleteWhere(), ctx->modify(),
+                                     ctx->clear(), ctx->drop(), ctx->create(),
+                                     ctx->copy(), ctx->move(), ctx->add());
   } else {
     parsedQuery_._clause = visitAlternative<parsedQuery::UpdateClause>(
-        ctx->load(), ctx->clear(), ctx->drop(), ctx->create(), ctx->add(),
-        ctx->move(), ctx->copy(), ctx->insertData(), ctx->deleteData());
+        ctx->load(), ctx->insertData(), ctx->deleteData());
   }
 
-  return std::move(parsedQuery_);
+  return {std::move(parsedQuery_)};
 }
 
 // ____________________________________________________________________________________
 Load Visitor::visit(Parser::LoadContext* ctx) {
-  return Load{
-      static_cast<bool>(ctx->SILENT()), visit(ctx->iri()),
-      ctx->graphRef() ? visit(ctx->graphRef()) : std::optional<GraphRef>{}};
+  reportNotSupported(ctx, "LOAD Update is");
+}
+
+parsedQuery::GroupGraphPattern::GraphSpec transformGraphspec(
+    const GraphRefAll& graph) {
+  using Graph = parsedQuery::GroupGraphPattern::GraphSpec;
+  return std::visit(
+      ad_utility::OverloadCallOperator{
+          [](const ad_utility::triple_component::Iri& iri) -> Graph {
+            return iri;
+          },
+          [](const ALL&) -> Graph { return Variable("?g"); },
+          [](const DEFAULT&) -> Graph {
+            return ad_utility::triple_component::Iri::fromIriref(
+                DEFAULT_GRAPH_IRI);
+          },
+          [](const NAMED&) -> Graph { AD_FAIL(); }},
+      graph);
+}
+
+parsedQuery::GroupGraphPattern::GraphSpec transformGraphspec(
+    const GraphOrDefault& graph) {
+  using Graph = parsedQuery::GroupGraphPattern::GraphSpec;
+  return std::visit(
+      ad_utility::OverloadCallOperator{
+          [](const ad_utility::triple_component::Iri& iri) -> Graph {
+            return iri;
+          },
+          [](const DEFAULT&) -> Graph {
+            return ad_utility::triple_component::Iri::fromIriref(
+                DEFAULT_GRAPH_IRI);
+          }},
+      graph);
+}
+
+GraphPatternOperation makeAllTripleGraphPattern(const auto& graph) {
+  GraphPattern inner;
+  inner._graphPatterns.emplace_back(
+      BasicGraphPattern{{{{Variable("?s")}, "?p", {Variable("?o")}}}});
+  return {parsedQuery::GroupGraphPattern{std::move(inner),
+                                         transformGraphspec(graph)}};
+}
+
+SparqlTripleSimpleWithGraph::Graph transformGraph(GraphRefAll graph) {
+  using Graph = SparqlTripleSimpleWithGraph::Graph;
+  return std::visit(
+      ad_utility::OverloadCallOperator{
+          [](const ad_utility::triple_component::Iri& iri) -> Graph {
+            return iri;
+          },
+          [](const ALL&) -> Graph { return Variable("?g"); },
+          [](const DEFAULT&) -> Graph {
+            return ad_utility::triple_component::Iri::fromIriref(
+                DEFAULT_GRAPH_IRI);
+          },
+          [](const NAMED&) -> Graph { AD_FAIL(); }},
+      graph);
+}
+
+SparqlTripleSimpleWithGraph::Graph transformGraph(const GraphOrDefault& graph) {
+  using Graph = SparqlTripleSimpleWithGraph::Graph;
+  return std::visit(
+      ad_utility::OverloadCallOperator{
+          [](const ad_utility::triple_component::Iri& iri) -> Graph {
+            return iri;
+          },
+          [](const DEFAULT&) -> Graph {
+            return ad_utility::triple_component::Iri::fromIriref(
+                DEFAULT_GRAPH_IRI);
+          }},
+      graph);
+}
+
+SparqlTripleSimpleWithGraph Visitor::makeAllTripleTemplatee(
+    const GraphRefAll& graph) {
+  return {{Variable("?s")},
+          {Variable("?p")},
+          {Variable("?o")},
+          transformGraph(graph)};
+}
+
+SparqlTripleSimpleWithGraph makeAllTripleTemplate(const auto& graph) {
+  return {{Variable("?s")},
+          {Variable("?p")},
+          {Variable("?o")},
+          transformGraph(graph)};
 }
 
 // ____________________________________________________________________________________
-Clear Visitor::visit(Parser::ClearContext* ctx) {
-  return Clear{static_cast<bool>(ctx->SILENT()), visit(ctx->graphRefAll())};
+ParsedQuery Visitor::visit(Parser::ClearContext* ctx) {
+  return makeClear(visit(ctx->graphRefAll()));
+}
+
+ParsedQuery Visitor::makeClear(const GraphOrDefault& graph) {
+  parsedQuery_._rootGraphPattern._graphPatterns.push_back(
+      makeAllTripleGraphPattern(graph));
+  parsedQuery_._clause = parsedQuery::UpdateClause{
+      GraphUpdate{{}, {makeAllTripleTemplate(graph)}}};
+  return parsedQuery_;
+}
+
+ParsedQuery Visitor::makeClear(const GraphRefAll& graph) {
+  if (std::holds_alternative<NAMED>(graph)) {
+    parsedQuery_._rootGraphPattern._graphPatterns.push_back(
+        makeAllTripleGraphPattern(ALL{}));
+    auto e = SparqlExpressionPimpl{
+        createExpression<sparqlExpression::NotEqualExpression>(
+            std::make_unique<sparqlExpression::VariableExpression>(
+                Variable("?g")),
+            std::make_unique<sparqlExpression::IriExpression>(
+                TripleComponent::Iri::fromIriref(DEFAULT_GRAPH_IRI))),
+        absl::StrCat("?g != ", DEFAULT_GRAPH_IRI)};
+    parsedQuery_._rootGraphPattern._filters.emplace_back(std::move(e));
+    parsedQuery_._clause = parsedQuery::UpdateClause{
+        GraphUpdate{{}, {makeAllTripleTemplatee(ALL{})}}};
+    return parsedQuery_;
+  }
+
+  parsedQuery_._rootGraphPattern._graphPatterns.push_back(
+      makeAllTripleGraphPattern(graph));
+  parsedQuery_._clause = parsedQuery::UpdateClause{
+      GraphUpdate{{}, {makeAllTripleTemplatee(graph)}}};
+  return parsedQuery_;
+}
+
+ParsedQuery Visitor::makeCopyAll(const GraphOrDefault& source,
+                                 const GraphOrDefault& target) {
+  parsedQuery_._rootGraphPattern._graphPatterns.push_back(
+      makeAllTripleGraphPattern(source));
+  parsedQuery_._clause = parsedQuery::UpdateClause{
+      GraphUpdate{{makeAllTripleTemplate(target)}, {}}};
+  return parsedQuery_;
 }
 
 // ____________________________________________________________________________________
-Drop Visitor::visit(Parser::DropContext* ctx) {
-  return Drop{static_cast<bool>(ctx->SILENT()), visit(ctx->graphRefAll())};
+ParsedQuery Visitor::visit(Parser::DropContext* ctx) {
+  return makeClear(visit(ctx->graphRefAll()));
 }
 
 // ____________________________________________________________________________________
-Create Visitor::visit(Parser::CreateContext* ctx) {
-  return Create{static_cast<bool>(ctx->SILENT()), visit(ctx->graphRef())};
-}
+std::vector<ParsedQuery> Visitor::visit(Parser::CreateContext*) { return {}; }
 
 // ____________________________________________________________________________________
-Add Visitor::visit(Parser::AddContext* ctx) {
+std::vector<ParsedQuery> Visitor::visit(Parser::AddContext* ctx) {
   AD_CORRECTNESS_CHECK(ctx->graphOrDefault().size() == 2);
-  return Add{static_cast<bool>(ctx->SILENT()),
-             visit(ctx->graphOrDefault().at(0)),
-             visit(ctx->graphOrDefault().at(1))};
+  auto from = visit(ctx->graphOrDefault()[0]);
+  auto to = visit(ctx->graphOrDefault()[1]);
+
+  if (from == to) {
+    return {};
+  }
+
+  return {makeCopyAll(from, to)};
 }
 
 // ____________________________________________________________________________________
-Move Visitor::visit(Parser::MoveContext* ctx) {
+std::vector<ParsedQuery> Visitor::visit(Parser::MoveContext* ctx) {
   AD_CORRECTNESS_CHECK(ctx->graphOrDefault().size() == 2);
-  return Move{static_cast<bool>(ctx->SILENT()),
-              visit(ctx->graphOrDefault().at(0)),
-              visit(ctx->graphOrDefault().at(1))};
+  auto from = visit(ctx->graphOrDefault()[0]);
+  auto to = visit(ctx->graphOrDefault()[1]);
+
+  if (from == to) {
+    return {};
+  }
+
+  std::vector<ParsedQuery> updates;
+
+  updates.push_back(makeClear(to));
+  resetStateForMultipleUpdates();
+  updates.push_back(makeCopyAll(from, to));
+  resetStateForMultipleUpdates();
+  updates.push_back(makeClear(from));
+
+  return updates;
 }
 
 // ____________________________________________________________________________________
-Copy Visitor::visit(Parser::CopyContext* ctx) {
-  return Copy{static_cast<bool>(ctx->SILENT()), visit(ctx->graphOrDefault()[0]),
-              visit(ctx->graphOrDefault()[1])};
+std::vector<ParsedQuery> Visitor::visit(Parser::CopyContext* ctx) {
+  AD_CORRECTNESS_CHECK(ctx->graphOrDefault().size() == 2);
+  auto from = visit(ctx->graphOrDefault()[0]);
+  auto to = visit(ctx->graphOrDefault()[1]);
+
+  if (from == to) {
+    return {};
+  }
+
+  std::vector<ParsedQuery> updates;
+
+  updates.push_back(makeClear(to));
+  resetStateForMultipleUpdates();
+  updates.push_back(makeCopyAll(from, to));
+
+  return updates;
 }
 
 // ____________________________________________________________________________________
