@@ -173,12 +173,17 @@ ExecuteUpdate::computeGraphUpdateQuads(
                           std::move(updateTriples), std::move(localVocab)};
       };
 
+  tracer.beginTrace("insertPreparation");
   auto [toInsertTemplates, toInsert, localVocabInsert] =
       prepareTemplateAndResultContainer(
           std::move(graphUpdate.toInsert_.triples_));
+  tracer.endTrace("insertPreparation");
+  tracer.beginTrace("deletePreparation");
   auto [toDeleteTemplates, toDelete, localVocabDelete] =
       prepareTemplateAndResultContainer(
           std::move(graphUpdate.toDelete_.triples_));
+  tracer.endTrace("deletePreparation");
+  tracer.beginTrace("computeQuads");
 
   uint64_t resultSize = 0;
   for (const auto& [pair, range] : ExportQueryExecutionTrees::getRowIndices(
@@ -192,11 +197,16 @@ ExecuteUpdate::computeGraphUpdateQuads(
       cancellationHandle->throwIfCancelled();
     }
   }
+  tracer.endTrace("computeQuads");
+  tracer.beginTrace("sortAndRemoveDuplicates");
   sortAndRemoveDuplicates(toInsert);
   sortAndRemoveDuplicates(toDelete);
   metadata.inUpdate_ = DeltaTriplesCount{static_cast<int64_t>(toInsert.size()),
                                          static_cast<int64_t>(toDelete.size())};
+  tracer.endTrace("sortAndRemoveDuplicates");
+  tracer.beginTrace("optimizeDelete");
   toDelete = setMinus(toDelete, toInsert);
+  tracer.endTrace("optimizeDelete");
   tracer.endTrace("preparation");
 
   return {
