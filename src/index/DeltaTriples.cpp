@@ -40,8 +40,6 @@ DeltaTriples::locateAndAddTriples(CancellationHandle cancellationHandle,
                                   ql::span<const IdTriple<0>> triples,
                                   bool insertOrDelete,
                                   ad_utility::timer::TimeTracer& tracer) {
-  std::array<std::vector<LocatedTriples::iterator>, Permutation::ALL.size()>
-      intermediateHandles;
   for (auto permutation : Permutation::ALL) {
     tracer.beginTrace(std::string{Permutation::toString(permutation)});
     tracer.beginTrace("locateTriples");
@@ -52,23 +50,13 @@ DeltaTriples::locateAndAddTriples(CancellationHandle cancellationHandle,
     cancellationHandle->throwIfCancelled();
     tracer.endTrace("locateTriples");
     tracer.beginTrace("addToLocatedTriples");
-    intermediateHandles[static_cast<size_t>(permutation)] =
-        this->locatedTriples()[static_cast<size_t>(permutation)].add(
-            locatedTriples, tracer);
+    this->locatedTriples()[static_cast<size_t>(permutation)].add(
+        std::move(locatedTriples), tracer);
     cancellationHandle->throwIfCancelled();
     tracer.endTrace("addToLocatedTriples");
     tracer.endTrace(Permutation::toString(permutation));
   }
-  tracer.beginTrace("transformHandles");
-  std::vector<DeltaTriples::LocatedTripleHandles> handles{triples.size()};
-  for (auto permutation : Permutation::ALL) {
-    for (size_t i = 0; i < triples.size(); i++) {
-      handles[i].forPermutation(permutation) =
-          intermediateHandles[static_cast<size_t>(permutation)][i];
-    }
-  }
-  tracer.endTrace("transformHandles");
-  return handles;
+  return {};
 }
 
 // ____________________________________________________________________________
@@ -188,22 +176,19 @@ void DeltaTriples::modifyTriplesImpl(CancellationHandle cancellationHandle,
   ql::ranges::for_each(triples, [this, &inverseMap](const IdTriple<0>& triple) {
     auto handle = inverseMap.find(triple);
     if (handle != inverseMap.end()) {
-      eraseTripleInAllPermutations(handle->second);
       inverseMap.erase(triple);
     }
   });
   tracer.endTrace("removeInverseTriples");
   tracer.beginTrace("locatedAndAdd");
 
-  std::vector<LocatedTripleHandles> handles = locateAndAddTriples(
-      std::move(cancellationHandle), triples, insertOrDelete, tracer);
+  locateAndAddTriples(std::move(cancellationHandle), triples, insertOrDelete,
+                      tracer);
   tracer.endTrace("locatedAndAdd");
   tracer.beginTrace("markTriples");
 
-  AD_CORRECTNESS_CHECK(triples.size() == handles.size());
-  // TODO<qup42>: replace with ql::views::zip in C++23
   for (size_t i = 0; i < triples.size(); i++) {
-    targetMap.insert({triples[i], handles[i]});
+    targetMap.insert(triples[i]);
   }
   tracer.endTrace("markTriples");
 }
@@ -346,7 +331,7 @@ void DeltaTriples::writeToDisk() const {
     return;
   }
   auto toRange = [](const TriplesToHandlesMap& map) {
-    return map | ql::views::keys |
+    return map |
            ql::views::transform(
                [](const IdTriple<0>& triple) -> const std::array<Id, 4>& {
                  return triple.ids();

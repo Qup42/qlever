@@ -124,8 +124,7 @@ class DeltaTriples {
 
     LocatedTriples::iterator& forPermutation(Permutation::Enum permutation);
   };
-  using TriplesToHandlesMap =
-      ad_utility::HashMap<IdTriple<0>, LocatedTripleHandles>;
+  using TriplesToHandlesMap = ad_utility::HashSet<IdTriple<0>>;
 
   // The sets of triples added to and subtracted from the original index. Any
   // triple can be at most in one of the sets. The information whether a triple

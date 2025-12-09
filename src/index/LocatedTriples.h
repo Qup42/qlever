@@ -80,7 +80,110 @@ struct LocatedTripleCompare {
     return x.triple_ < y.triple_;
   }
 };
-using LocatedTriples = std::set<LocatedTriple, LocatedTripleCompare>;
+
+struct SortedVector {
+  std::vector<LocatedTriple> triples_;
+
+  using iterator = std::vector<LocatedTriple>::iterator;
+  using const_iterator = std::vector<LocatedTriple>::const_iterator;
+  using const_reverse_iterator =
+      std::vector<LocatedTriple>::const_reverse_iterator;
+
+  void insert(LocatedTriple lt) {
+    LocatedTripleCompare comp;
+    auto it = ql::ranges::lower_bound(triples_, lt, comp);
+    if (it == triples_.end() || comp(lt, *it)) {
+      triples_.insert(it, std::move(lt));
+    }
+    // return it;
+  }
+  void insert_range(std::vector<LocatedTriple> triples) {
+    ql::ranges::sort(triples, LocatedTripleCompare{});
+
+    std::vector<LocatedTriple> merged;
+    merged.reserve(triples_.size() + triples.size());
+
+    LocatedTripleCompare comp;
+
+    size_t i = 0;
+    size_t j = 0;
+
+    while (i < triples_.size() && j < triples.size()) {
+      if (comp(triples_[i], triples[j])) {
+        merged.push_back(std::move(triples_[i++]));
+      } else if (comp(triples[j], triples_[i])) {
+        merged.push_back(std::move(triples[j++]));
+      } else {
+        merged.push_back(std::move(triples[j++]));
+        ++i;
+      }
+    }
+
+    while (i < triples_.size()) merged.push_back(std::move(triples_[i++]));
+    while (j < triples.size()) merged.push_back(std::move(triples[j++]));
+
+    triples_.swap(merged);
+  }
+  std::pair<iterator, bool> emplace(LocatedTriple) {
+    return {triples_.end(), true};
+  }
+
+  iterator begin() { return triples_.begin(); }
+  const_iterator begin() const { return triples_.begin(); }
+  const_reverse_iterator rbegin() const { return triples_.rbegin(); }
+  iterator end() { return triples_.end(); }
+  const_iterator end() const { return triples_.end(); }
+  const_reverse_iterator rend() const { return triples_.rend(); }
+
+  void erase(const LocatedTriple& it) {
+    auto iter = ql::ranges::find(triples_, it);
+    triples_.erase(iter);
+  }
+  void erase_range(std::vector<LocatedTriple> its) {
+    ql::ranges::sort(its, LocatedTripleCompare{});
+
+    auto targetIt = triples_.begin();
+    auto elemIt = triples_.begin();
+    auto deletionIt = its.begin();
+    LocatedTripleCompare comp;
+
+    while (elemIt != triples_.end() && deletionIt != its.end()) {
+      // elem < deletion
+      if (comp(*elemIt, *deletionIt)) {
+        if (targetIt != elemIt) {
+          *targetIt = std::move(*elemIt);
+        }
+        ++targetIt;
+        ++elemIt;
+      }
+      // deletion < elem
+      else if (comp(*deletionIt, *elemIt)) {
+        ++deletionIt;
+        // elem == deletion
+      } else {
+        ++elemIt;
+        ++deletionIt;
+      }
+    }
+    // ql::ranges::copy(elemIt, triples_.end(), targetIt);
+    if (deletionIt == its.end()) {
+      while (elemIt != triples_.end()) {
+        if (targetIt != elemIt) {
+          *targetIt = std::move(*elemIt);
+        }
+        ++targetIt;
+        ++elemIt;
+      }
+    }
+    triples_.erase(targetIt, triples_.end());
+  }
+
+  size_t size() const { return triples_.size(); }
+  bool empty() const { return triples_.empty(); }
+};
+
+//using LocatedTriples = std::set<LocatedTriple, LocatedTripleCompare>;
+using LocatedTriples = SortedVector;
 
 // This operator is only for debugging and testing. It returns a
 // human-readable representation.
@@ -172,7 +275,7 @@ class LocatedTriplesPerBlock {
   // PRECONDITION: The `locatedTriples` must not already exist in
   // `LocatedTriplesPerBlock`.
   std::vector<LocatedTriples::iterator> add(
-      ql::span<const LocatedTriple> locatedTriples,
+      std::vector<LocatedTriple> locatedTriples,
       ad_utility::timer::TimeTracer& tracer =
           ad_utility::timer::DEFAULT_TIME_TRACER);
 

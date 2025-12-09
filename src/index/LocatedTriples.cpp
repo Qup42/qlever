@@ -229,24 +229,37 @@ IdTable LocatedTriplesPerBlock::mergeTriples(size_t blockIndex,
   }
 }
 
+std::vector<std::vector<LocatedTriple>> split_into_categories(
+    std::vector<LocatedTriple> lts) {
+  std::vector<std::vector<LocatedTriple>> categories;
+  if (lts.empty()) return categories;
+
+  auto start = lts.begin();
+  auto prev_cat = start->blockIndex_;
+  for (auto it = std::next(start); it != lts.end(); ++it) {
+    auto curr_cat = it->blockIndex_;
+    if (curr_cat != prev_cat) {
+      categories.emplace_back(std::make_move_iterator(start), std::make_move_iterator(it));
+      start = it;
+      prev_cat = curr_cat;
+    }
+  }
+  categories.emplace_back(std::make_move_iterator(start), std::make_move_iterator(lts.end()));
+  return categories;
+}
+
 // ____________________________________________________________________________
 std::vector<LocatedTriples::iterator> LocatedTriplesPerBlock::add(
-    ql::span<const LocatedTriple> locatedTriples,
+    std::vector<LocatedTriple> locatedTriples,
     ad_utility::timer::TimeTracer& tracer) {
   tracer.beginTrace("adding");
-  std::vector<LocatedTriples::iterator> handles;
-  handles.reserve(locatedTriples.size());
-  for (auto triple : locatedTriples) {
-    LocatedTriples& locatedTriplesInBlock = map_[triple.blockIndex_];
-    auto [handle, wasInserted] = locatedTriplesInBlock.emplace(triple);
-    AD_CORRECTNESS_CHECK(wasInserted == true);
-    AD_CORRECTNESS_CHECK(handle != locatedTriplesInBlock.end());
-    ++numTriples_;
-    handles.emplace_back(handle);
+  ql::ranges::sort(locatedTriples, LocatedTripleCompare{});
+  auto cats = split_into_categories(std::move(locatedTriples));
+  for (auto& cat : cats) {
+    map_[cat.front().blockIndex_].insert_range(std::move(cat));
   }
-
   tracer.endTrace("adding");
-  return handles;
+  return {};
 }
 
 // ____________________________________________________________________________
@@ -256,7 +269,7 @@ void LocatedTriplesPerBlock::erase(size_t blockIndex,
   AD_CONTRACT_CHECK(blockIter != map_.end(), "Block ", blockIndex,
                     " is not contained.");
   auto& block = blockIter->second;
-  block.erase(iter);
+  block.erase(*iter);
   numTriples_--;
   if (block.empty()) {
     map_.erase(blockIndex);
