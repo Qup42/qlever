@@ -95,7 +95,7 @@ struct SortedVector {
     auto sortedUntilIt = triples_.begin() + sortedUntil_;
     std::stable_sort(sortedUntilIt, triples_.end(), LocatedTripleCompare{});
     auto rit =
-        std::unique(std::make_reverse_iterator(sortedUntilIt), triples_.rend(),
+        std::unique(triples_.rbegin(), triples_.rend() - sortedUntil_,
                     [](const LocatedTriple& lt1, const LocatedTriple& lt2) {
                       return lt1.triple_ == lt2.triple_;
                     });
