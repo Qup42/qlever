@@ -127,7 +127,6 @@ struct SortedVector {
   }
 
   void ensureIntegration() const {
-    //if (!unsortedTriples_.empty()) {
     if (dirty_) {
       ql::ranges::stable_sort(triples_, LocatedTripleCompare{});
       auto rit = std::unique(triples_.rbegin(), triples_.rend(), [](const LocatedTriple& lt1, const LocatedTriple& lt2) {
@@ -139,24 +138,8 @@ struct SortedVector {
   }
 
   void insert(LocatedTriple lt) {
-    //LocatedTripleCompare comp;
-    //auto it = ql::ranges::lower_bound(triples_, lt, comp);
-    //if (it == triples_.end() || comp(lt, *it)) {
-    //  triples_.insert(it, std::move(lt));
-    //}
     triples_.push_back(std::move(lt));
     dirty_ = true;
-    //checkIntegration();
-    // return it;
-  }
-  void insert_range(std::vector<LocatedTriple>) {
-    AD_FAIL();
-    //unsortedTriples_.insert(unsortedTriples_.end(), triples.begin(),
-    //                        triples.end());
-    //checkIntegration();
-  }
-  std::pair<iterator, bool> emplace(LocatedTriple) {
-    return {triples_.end(), true};
   }
 
   iterator begin() {
