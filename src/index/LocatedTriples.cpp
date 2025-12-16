@@ -253,11 +253,14 @@ std::vector<LocatedTriples::iterator> LocatedTriplesPerBlock::add(
     std::vector<LocatedTriple> locatedTriples,
     ad_utility::timer::TimeTracer& tracer) {
   tracer.beginTrace("adding");
-  ql::ranges::sort(locatedTriples, LocatedTripleCompare{});
-  auto cats = split_into_categories(std::move(locatedTriples));
-  for (auto& cat : cats) {
-    map_[cat.front().blockIndex_].insert_range(std::move(cat));
+  for (auto& locatedTriple : locatedTriples) {
+    map_[locatedTriple.blockIndex_].insert(std::move(locatedTriple));
   }
+  // ql::ranges::sort(locatedTriples, LocatedTripleCompare{});
+  // auto cats = split_into_categories(std::move(locatedTriples));
+  // for (auto& cat : cats) {
+  //   map_[cat.front().blockIndex_].insert_range(std::move(cat));
+  // }
   tracer.endTrace("adding");
   return {};
 }

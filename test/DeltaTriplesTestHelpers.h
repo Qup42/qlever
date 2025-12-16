@@ -7,15 +7,15 @@
 // You may not use this file except in compliance with the Apache 2.0 License,
 // which can be found in the `LICENSE` file at the root of the QLever project.
 
+#ifndef QLEVER_TEST_DELTATRIPLESTESTHELPERS_H
+#define QLEVER_TEST_DELTATRIPLESTESTHELPERS_H
+
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include "index/DeltaTriples.h"
 #include "index/LocatedTriples.h"
 #include "util/GTestHelpers.h"
-
-#ifndef QLEVER_TEST_DELTATRIPLESTESTHELPERS_H
-#define QLEVER_TEST_DELTATRIPLESTESTHELPERS_H
 
 namespace deltaTriplesTestHelpers {
 

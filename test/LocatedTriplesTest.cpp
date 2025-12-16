@@ -148,9 +148,9 @@ TEST_F(LocatedTriplesTest, numTriplesInBlock) {
   EXPECT_THAT(locatedTriplesPerBlock, numTriplesTotal(7));
   EXPECT_THAT(locatedTriplesPerBlock,
               numTriplesBlockwise({{0, {3, 3}}, {1, {2, 2}}, {3, {2, 2}}}));
-  EXPECT_THAT(locatedTriplesPerBlock,
-              locatedTriplesAre(
-                  {{0, {LT1, LT2, LT3}}, {1, {LT4, LT5}}, {3, {LT6, LT7}}}));
+  EXPECT_THAT(locatedTriplesPerBlock, locatedTriplesAre({{0, {{LT1, LT2, LT3}}},
+                                                         {1, {{LT4, LT5}}},
+                                                         {3, {{LT6, LT7}}}}));
 
   auto handles = locatedTriplesPerBlock.add(std::vector{LT8, LT9});
 
@@ -160,10 +160,10 @@ TEST_F(LocatedTriplesTest, numTriplesInBlock) {
               numTriplesBlockwise(
                   {{0, {3, 3}}, {1, {2, 2}}, {2, {1, 1}}, {3, {3, 3}}}));
   EXPECT_THAT(locatedTriplesPerBlock,
-              locatedTriplesAre({{0, {LT1, LT2, LT3}},
-                                 {1, {LT4, LT5}},
-                                 {2, {LT8}},
-                                 {3, {LT6, LT7, LT9}}}));
+              locatedTriplesAre({{0, {{LT1, LT2, LT3}}},
+                                 {1, {{LT4, LT5}}},
+                                 {2, {{LT8}}},
+                                 {3, {{LT6, LT7, LT9}}}}));
 
   locatedTriplesPerBlock.erase(2, handles[0]);
   locatedTriplesPerBlock.updateAugmentedMetadata();
@@ -176,7 +176,7 @@ TEST_F(LocatedTriplesTest, numTriplesInBlock) {
   EXPECT_THAT(
       locatedTriplesPerBlock,
       locatedTriplesAre(
-          {{0, {LT1, LT2, LT3}}, {1, {LT4, LT5}}, {3, {LT6, LT7, LT9}}}));
+          {{0, {{LT1, LT2, LT3}}}, {1, {{LT4, LT5}}}, {3, {{LT6, LT7, LT9}}}}));
 
   // Erasing in a block that does not exist, raises an exception.
   EXPECT_THROW(locatedTriplesPerBlock.erase(100, handles[1]),
@@ -192,7 +192,7 @@ TEST_F(LocatedTriplesTest, numTriplesInBlock) {
   EXPECT_THAT(
       locatedTriplesPerBlock,
       locatedTriplesAre(
-          {{0, {LT1, LT2, LT3}}, {1, {LT4, LT5}}, {3, {LT6, LT7, LT9}}}));
+          {{0, {{LT1, LT2, LT3}}}, {1, {{LT4, LT5}}}, {3, {{LT6, LT7, LT9}}}}));
 
   locatedTriplesPerBlock.erase(3, handles[1]);
   locatedTriplesPerBlock.updateAugmentedMetadata();
@@ -202,9 +202,9 @@ TEST_F(LocatedTriplesTest, numTriplesInBlock) {
   EXPECT_THAT(locatedTriplesPerBlock,
               numTriplesBlockwise(
                   {{0, {3, 3}}, {1, {2, 2}}, {2, {0, 0}}, {3, {2, 2}}}));
-  EXPECT_THAT(locatedTriplesPerBlock,
-              locatedTriplesAre(
-                  {{0, {LT1, LT2, LT3}}, {1, {LT4, LT5}}, {3, {LT6, LT7}}}));
+  EXPECT_THAT(locatedTriplesPerBlock, locatedTriplesAre({{0, {{LT1, LT2, LT3}}},
+                                                         {1, {{LT4, LT5}}},
+                                                         {3, {{LT6, LT7}}}}));
 
   locatedTriplesPerBlock.clear();
 
