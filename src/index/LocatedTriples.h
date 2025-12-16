@@ -83,7 +83,7 @@ struct LocatedTripleCompare {
 
 struct SortedVector {
   mutable std::vector<LocatedTriple> triples_;
-  mutable std::vector<LocatedTriple> unsortedTriples_;
+  mutable size_t sortedUntil_ = 0;
   mutable bool dirty_ = false;
 
   using iterator = std::vector<LocatedTriple>::iterator;
@@ -91,48 +91,62 @@ struct SortedVector {
   using const_reverse_iterator =
       std::vector<LocatedTriple>::const_reverse_iterator;
 
-  void integrateTriples() const {
-    ql::ranges::sort(unsortedTriples_, LocatedTripleCompare{});
+  void zipSort() const {
+    auto sortedUntilIt = triples_.begin() + sortedUntil_;
+    std::stable_sort(sortedUntilIt, triples_.end(), LocatedTripleCompare{});
+    auto rit =
+        std::unique(std::make_reverse_iterator(sortedUntilIt), triples_.rend(),
+                    [](const LocatedTriple& lt1, const LocatedTriple& lt2) {
+                      return lt1.triple_ == lt2.triple_;
+                    });
+    triples_.erase(sortedUntilIt, rit.base());
 
     std::vector<LocatedTriple> merged;
-    merged.reserve(triples_.size() + unsortedTriples_.size());
+    merged.reserve(triples_.size());
 
     LocatedTripleCompare comp;
 
-    size_t i = 0;
-    size_t j = 0;
+    auto largeIt = triples_.begin();
+    auto smallIt = sortedUntilIt;
 
-    while (i < triples_.size() && j < unsortedTriples_.size()) {
-      if (comp(triples_[i], unsortedTriples_[j])) {
-        merged.push_back(std::move(triples_[i++]));
-      } else if (comp(unsortedTriples_[j], triples_[i])) {
-        merged.push_back(std::move(unsortedTriples_[j++]));
+    while (largeIt != sortedUntilIt && smallIt != triples_.end()) {
+      if (comp(*largeIt, *smallIt)) {
+        merged.push_back(std::move(*largeIt));
+        ++largeIt;
+      } else if (comp(*smallIt, *largeIt)) {
+        merged.push_back(std::move(*smallIt));
+        ++smallIt;
       } else {
-        merged.push_back(std::move(unsortedTriples_[j++]));
-        ++i;
+        merged.push_back(std::move(*smallIt));
+        ++smallIt;
+        ++largeIt;
       }
     }
 
-    while (i < triples_.size()) merged.push_back(std::move(triples_[i++]));
-    while (j < unsortedTriples_.size())
-      merged.push_back(std::move(unsortedTriples_[j++]));
+    std::copy(largeIt, sortedUntilIt, std::back_inserter(merged));
+    std::copy(smallIt, triples_.end(), std::back_inserter(merged));
 
     triples_.swap(merged);
   }
 
-  void checkIntegration() {
-    if (unsortedTriples_.size() > triples_.size() / 2) {
-      integrateTriples();
-    }
-  }
-
   void ensureIntegration() const {
     if (dirty_) {
-      ql::ranges::stable_sort(triples_, LocatedTripleCompare{});
-      auto rit = std::unique(triples_.rbegin(), triples_.rend(), [](const LocatedTriple& lt1, const LocatedTriple& lt2) {
-        return lt1.triple_ == lt2.triple_;
-      });
-      triples_.erase(triples_.begin(), rit.base());
+      if (triples_.size() > 5000) {
+        AD_LOG_INFO << "Sorting large LocatedTriples Block #"
+                    << triples_.front().blockIndex_ << " with " << sortedUntil_
+                    << " old and " << triples_.size() - sortedUntil_
+                    << " new entries." << std::endl;
+        zipSort();
+      } else {
+        ql::ranges::stable_sort(triples_, LocatedTripleCompare{});
+        auto rit =
+            std::unique(triples_.rbegin(), triples_.rend(),
+                        [](const LocatedTriple& lt1, const LocatedTriple& lt2) {
+                          return lt1.triple_ == lt2.triple_;
+                        });
+        triples_.erase(triples_.begin(), rit.base());
+      }
+      sortedUntil_ = triples_.size();
       dirty_ = false;
     }
   }
@@ -210,8 +224,8 @@ struct SortedVector {
     triples_.erase(targetIt, triples_.end());
   }
 
-  size_t size() const { return triples_.size() + unsortedTriples_.size(); }
-  bool empty() const { return triples_.empty() && unsortedTriples_.empty(); }
+  size_t size() const { return triples_.size(); }
+  bool empty() const { return triples_.empty(); }
 
   QL_DEFINE_DEFAULTED_EQUALITY_OPERATOR(SortedVector, triples_);
 };
