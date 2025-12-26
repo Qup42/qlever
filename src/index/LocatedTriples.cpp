@@ -253,6 +253,7 @@ std::vector<LocatedTriples::iterator> LocatedTriplesPerBlock::add(
     std::vector<LocatedTriple> locatedTriples,
     ad_utility::timer::TimeTracer& tracer) {
   tracer.beginTrace("adding");
+  numTriples_ += locatedTriples.size();
   for (auto& locatedTriple : locatedTriples) {
     map_[locatedTriple.blockIndex_].insert(std::move(locatedTriple));
   }
@@ -261,13 +262,12 @@ std::vector<LocatedTriples::iterator> LocatedTriplesPerBlock::add(
 }
 
 // ____________________________________________________________________________
-void LocatedTriplesPerBlock::erase(size_t blockIndex,
-                                   LocatedTriples::iterator iter) {
+void LocatedTriplesPerBlock::erase(size_t blockIndex, LocatedTriple lt) {
   auto blockIter = map_.find(blockIndex);
   AD_CONTRACT_CHECK(blockIter != map_.end(), "Block ", blockIndex,
                     " is not contained.");
   auto& block = blockIter->second;
-  block.erase(*iter);
+  block.erase(lt);
   numTriples_--;
   if (block.empty()) {
     map_.erase(blockIndex);

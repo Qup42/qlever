@@ -90,18 +90,6 @@ DeltaTriples::locateAndAddTriples(CancellationHandle cancellationHandle,
 }
 
 // ____________________________________________________________________________
-template <bool isInternal>
-void DeltaTriples::eraseTripleInAllPermutations(
-    typename TriplesToHandles<isInternal>::LocatedTripleHandles& handles) {
-  auto& lt = getLocatedTriple<isInternal>();
-  // Erase for all permutations.
-  for (auto permutation : Permutation::all<isInternal>()) {
-    auto ltIter = handles.forPermutation(permutation);
-    lt[static_cast<int>(permutation)].erase(ltIter->blockIndex_, ltIter);
-  }
-}
-
-// ____________________________________________________________________________
 DeltaTriplesCount DeltaTriples::getCounts() const {
   return {numInserted(), numDeleted()};
 }

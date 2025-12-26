@@ -331,7 +331,7 @@ class LocatedTriplesPerBlock {
   //
   // NOTE: `updateAugmentedMetadata()` must be called to update the block
   // metadata.
-  void erase(size_t blockIndex, LocatedTriples::iterator iter);
+  void erase(size_t blockIndex, LocatedTriple lt);
 
   // Get the total number of `LocatedTriple`s (for all blocks).
   size_t numTriples() const { return numTriples_; }
