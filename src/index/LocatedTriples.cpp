@@ -10,6 +10,8 @@
 
 #include "index/LocatedTriples.h"
 
+#include <ranges>
+
 #include "backports/algorithm.h"
 #include "index/CompressedRelation.h"
 #include "index/ConstantsIndexBuilding.h"
@@ -261,6 +263,15 @@ void LocatedTriplesPerBlock::erase(size_t blockIndex,
   if (block.empty()) {
     map_.erase(blockIndex);
   }
+}
+
+// ____________________________________________________________________________
+ad_utility::HashMap<size_t, size_t> LocatedTriplesPerBlock::getBlockSizes()
+    const {
+  auto view = map_ | std::views::transform([](const auto& pair) {
+                return std::make_pair(pair.first, pair.second.size());
+              });
+  return ad_utility::HashMap<size_t, size_t>{view.begin(), view.end()};
 }
 
 // ____________________________________________________________________________

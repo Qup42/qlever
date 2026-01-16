@@ -444,6 +444,34 @@ CPP_template_def(typename RequestT, typename ResponseT)(
         handle);
     auto countAfterClear = co_await std::move(coroutine);
     response = createJsonResponse(json(countAfterClear), request);
+  } else if (auto cmd = checkParameter("cmd", "get-updated-block-sizes")) {
+    requireValidAccessToken("get-updated-block-sizes");
+    logCommand(cmd, "get sizes of blocks with updates for all permutations");
+    auto locatedTriplesState =
+        index_.deltaTriplesManager().getCurrentLocatedTriplesSharedState();
+    auto mapToJson = [](auto map) {
+      nlohmann::json res = nlohmann::json::object();
+      for (const auto& [key, value] : map) {
+        res[std::to_string(key)] = value;
+      }
+      return res;
+    };
+    nlohmann::json jsonResponse;
+    for (auto permutation : Permutation::ALL) {
+      const auto& locatedTriples =
+          locatedTriplesState->getLocatedTriplesForPermutation<false>(
+              permutation);
+      jsonResponse[Permutation::toString(permutation)] =
+          mapToJson(locatedTriples.getBlockSizes());
+    }
+    for (auto permutation : Permutation::INTERNAL) {
+      const auto& locatedTriples =
+          locatedTriplesState->getLocatedTriplesForPermutation<true>(
+              permutation);
+      jsonResponse[absl::StrCat(Permutation::toString(permutation), "I")] =
+          mapToJson(locatedTriples.getBlockSizes());
+    }
+    response = createJsonResponse(jsonResponse, request);
   } else if (auto cmd = checkParameter("cmd", "get-settings")) {
     logCommand(cmd, "get server settings");
     response = createJsonResponse(

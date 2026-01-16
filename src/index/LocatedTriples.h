@@ -186,6 +186,9 @@ class LocatedTriplesPerBlock {
   // Get the number of blocks with a non-empty set of located triples.
   size_t numBlocks() const { return map_.size(); }
 
+  // Returns the sizes of the blocks that have updates.
+  ad_utility::HashMap<size_t, size_t> getBlockSizes() const;
+
   // Must be called initially before using the `LocatedTriplesPerBlock` to
   // initialize the original block metadata that is augmented for updated
   // triples. This is currently done in `Permutation::loadFromDisk`.
