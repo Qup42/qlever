@@ -381,14 +381,31 @@ void DeltaTriples::modifyTriplesImpl(CancellationHandle cancellationHandle,
 }
 
 // ____________________________________________________________________________
-LocatedTriplesSharedState DeltaTriples::getLocatedTriplesSharedStateCopy()
-    const {
+LocatedTriplesSharedState DeltaTriples::getLocatedTriplesSharedStateCopy(
+    ad_utility::timer::TimeTracer& tracer) const {
   // Create a copy of the `LocatedTriplesState` for use as a constant
   // snapshot.
-  return LocatedTriplesSharedState{std::make_shared<LocatedTriplesState>(
-      locatedTriples_->locatedTriplesPerBlock_,
-      locatedTriples_->internalLocatedTriplesPerBlock_,
-      localVocab_.getLifetimeExtender(), locatedTriples_->index_)};
+  tracer.beginTrace("copyLocatedTriplesPerBlock");
+  auto locatedTriplesPerBlock = locatedTriples_->locatedTriplesPerBlock_;
+  tracer.endTrace("copyLocatedTriplesPerBlock");
+
+  tracer.beginTrace("copyInternalLocatedTriplesPerBlock");
+  auto internalLocatedTriplesPerBlock =
+      locatedTriples_->internalLocatedTriplesPerBlock_;
+  tracer.endTrace("copyInternalLocatedTriplesPerBlock");
+
+  tracer.beginTrace("getLifetimeExtender");
+  auto lifetimeExtender = localVocab_.getLifetimeExtender();
+  tracer.endTrace("getLifetimeExtender");
+
+  tracer.beginTrace("makeSharedLocatedTriplesState");
+  auto result = LocatedTriplesSharedState{std::make_shared<LocatedTriplesState>(
+      std::move(locatedTriplesPerBlock),
+      std::move(internalLocatedTriplesPerBlock), std::move(lifetimeExtender),
+      locatedTriples_->index_)};
+  tracer.endTrace("makeSharedLocatedTriplesState");
+
+  return result;
 }
 
 // ____________________________________________________________________________
@@ -437,8 +454,8 @@ ReturnType DeltaTriplesManager::modify(
   return deltaTriples_.withWriteLock([this, &function, writeToDiskAfterRequest,
                                       updateMetadataAfterRequest,
                                       &tracer](DeltaTriples& deltaTriples) {
-    auto updateSnapshot = [this, &deltaTriples] {
-      auto newSnapshot = deltaTriples.getLocatedTriplesSharedStateCopy();
+    auto updateSnapshot = [this, &deltaTriples, &tracer] {
+      auto newSnapshot = deltaTriples.getLocatedTriplesSharedStateCopy(tracer);
       currentLocatedTriplesSharedState_.withWriteLock(
           [&newSnapshot](auto& currentSnapshot) {
             currentSnapshot = std::move(newSnapshot);

@@ -256,7 +256,9 @@ class DeltaTriples {
   // Return a deep copy of the `LocatedTriples` and the corresponding
   // `LocalVocab` which form an unchanging snapshot of the current state of
   // this `DeltaTriples` object.
-  LocatedTriplesSharedState getLocatedTriplesSharedStateCopy() const;
+  LocatedTriplesSharedState getLocatedTriplesSharedStateCopy(
+      ad_utility::timer::TimeTracer& tracer =
+          ad_utility::timer::DEFAULT_TIME_TRACER) const;
 
   // Return a cheap shallow copy of the `LocatedTriples` which directly mirrors
   // the state of this `DeltaTriples` object. NOTE: only use this when the
