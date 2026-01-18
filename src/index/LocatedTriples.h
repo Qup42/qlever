@@ -82,7 +82,7 @@ struct LocatedTripleCompare {
 struct SortedVector {
   mutable std::vector<LocatedTriple> triples_;
   mutable size_t sortedUntil_ = 0;
-  mutable bool dirty_ = false;
+  mutable bool dirty_ = true;
 
   using iterator = std::vector<LocatedTriple>::iterator;
   using const_iterator = std::vector<LocatedTriple>::const_iterator;

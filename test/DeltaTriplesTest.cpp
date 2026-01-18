@@ -405,12 +405,10 @@ TEST_F(DeltaTriplesTest, insertTriplesAndDeleteTriples) {
   auto keysMatch =
       [&toId,
        graphId](std::vector<std::array<TripleComponent, 3>> tripleComponents) {
-        std::vector<::testing::internal::KeyMatcher<
-            ::testing::internal::EqMatcher<IdTriple<0>>>>
-            keys;
+        std::vector<::testing::internal::EqMatcher<IdTriple<0>>> keys;
         for (auto& [subject, predicate, object] : tripleComponents) {
-          keys.push_back(::testing::Key(::testing::Eq(IdTriple<0>{
-              {toId(subject), toId(predicate), toId(object), graphId}})));
+          keys.push_back(::testing::Eq(IdTriple<0>{
+              {toId(subject), toId(predicate), toId(object), graphId}}));
         }
         return ::testing::UnorderedElementsAreArray(keys);
       };
