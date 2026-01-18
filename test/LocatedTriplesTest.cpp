@@ -165,6 +165,48 @@ TEST_F(LocatedTriplesTest, numTriplesInBlock) {
                                  {2, {{LT8}}},
                                  {3, {{LT6, LT7, LT9}}}}));
 
+  locatedTriplesPerBlock.erase(2, LT8);
+  locatedTriplesPerBlock.updateAugmentedMetadata();
+
+  EXPECT_THAT(locatedTriplesPerBlock, numBlocks(3));
+  EXPECT_THAT(locatedTriplesPerBlock, numTriplesTotal(8));
+  EXPECT_THAT(locatedTriplesPerBlock,
+              numTriplesBlockwise(
+                  {{0, {3, 3}}, {1, {2, 2}}, {2, {0, 0}}, {3, {3, 3}}}));
+  EXPECT_THAT(
+      locatedTriplesPerBlock,
+      locatedTriplesAre(
+          {{0, {{LT1, LT2, LT3}}}, {1, {{LT4, LT5}}}, {3, {{LT6, LT7, LT9}}}}));
+
+  // Erasing in a block that does not exist, raises an exception.
+  EXPECT_THROW(locatedTriplesPerBlock.erase(100, LT9), ad_utility::Exception);
+  locatedTriplesPerBlock.updateAugmentedMetadata();
+
+  // Nothing changed.
+  EXPECT_THAT(locatedTriplesPerBlock, numBlocks(3));
+  EXPECT_THAT(locatedTriplesPerBlock, numTriplesTotal(8));
+  EXPECT_THAT(locatedTriplesPerBlock,
+              numTriplesBlockwise(
+                  {{0, {3, 3}}, {1, {2, 2}}, {2, {0, 0}}, {3, {3, 3}}}));
+  EXPECT_THAT(
+      locatedTriplesPerBlock,
+      locatedTriplesAre(
+          {{0, {{LT1, LT2, LT3}}}, {1, {{LT4, LT5}}}, {3, {{LT6, LT7, LT9}}}}));
+
+  locatedTriplesPerBlock.erase(3, LT9);
+  locatedTriplesPerBlock.updateAugmentedMetadata();
+
+  EXPECT_THAT(locatedTriplesPerBlock, numBlocks(3));
+  EXPECT_THAT(locatedTriplesPerBlock, numTriplesTotal(7));
+  EXPECT_THAT(locatedTriplesPerBlock,
+              numTriplesBlockwise(
+                  {{0, {3, 3}}, {1, {2, 2}}, {2, {0, 0}}, {3, {2, 2}}}));
+  EXPECT_THAT(locatedTriplesPerBlock,
+              locatedTriplesAre({{0, {{LT1, LT2, LT3}}},
+                                 {1, {{LT4, LT5}}},
+                                 {2, {{LT8}}},
+                                 {3, {{LT6, LT7, LT9}}}}));
+
   locatedTriplesPerBlock.clear();
 
   EXPECT_THAT(locatedTriplesPerBlock, numBlocks(0));
@@ -745,12 +787,24 @@ TEST_F(LocatedTriplesTest, augmentedMetadata) {
                 testing::ElementsAreArray(expectedAugmentedMetadata));
 
     // T4 is before block 4. The beginning of block 4 changes.
-    locatedTriplesPerBlock.add(LocatedTriple::locateTriplesInPermutation(
-        Span{T4}, metadata, keyOrder, true, handle));
+    auto locatedTriples = LocatedTriple::locateTriplesInPermutation(
+        Span{T4}, metadata, keyOrder, true, handle);
+    locatedTriplesPerBlock.add(locatedTriples);
     locatedTriplesPerBlock.updateAugmentedMetadata();
 
     expectedAugmentedMetadata[4] = CBM(T4.toPermutedTriple(), PT8);
     expectedAugmentedMetadata[4].containsDuplicatesWithDifferentGraphs_ = true;
+    EXPECT_THAT(locatedTriplesPerBlock.getAugmentedMetadata(),
+                testing::ElementsAreArray(expectedAugmentedMetadata));
+
+    // Erasing the update of T4 restores the beginning of block 4.
+    locatedTriplesPerBlock.erase(4, locatedTriples[0]);
+    locatedTriplesPerBlock.updateAugmentedMetadata();
+
+    expectedAugmentedMetadata[4] = CBM(PT8, PT8);
+    // The block 4 has no more updates, so we restore the info about the block
+    // having no duplicates from the original metadata.
+    expectedAugmentedMetadata[4].containsDuplicatesWithDifferentGraphs_ = false;
     EXPECT_THAT(locatedTriplesPerBlock.getAugmentedMetadata(),
                 testing::ElementsAreArray(expectedAugmentedMetadata));
 

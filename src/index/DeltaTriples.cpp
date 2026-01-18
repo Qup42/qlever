@@ -331,13 +331,13 @@ void DeltaTriples::modifyTriplesImpl(CancellationHandle cancellationHandle,
   tracer.endTrace("removeInverseTriples");
   tracer.beginTrace("locatedAndAdd");
 
-  locateAndAddTriples<isInternal>(
-      std::move(cancellationHandle), triples, insertOrDelete, tracer);
+  locateAndAddTriples<isInternal>(std::move(cancellationHandle), triples,
+                                  insertOrDelete, tracer);
   tracer.endTrace("locatedAndAdd");
   tracer.beginTrace("markTriples");
 
-  for (size_t i = 0; i < triples.size(); i++) {
-    targetMap.insert(triples[i]);
+  for (auto& triple : triples) {
+    targetMap.insert(std::move(triple));
   }
   tracer.endTrace("markTriples");
 }
