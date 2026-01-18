@@ -154,27 +154,11 @@ TEST_F(DeltaTriplesTest, insertTriplesAndDeleteTriples) {
   auto cancellationHandle =
       std::make_shared<ad_utility::CancellationHandle<>>();
 
-  auto mapKeys = [](auto& map) {
-    return ad_utility::transform(map,
-                                 [](const auto& item) { return item.first; });
-  };
-  auto UnorderedTriplesAre = [&mapKeys, this, &vocab, &localVocab](
-                                 [[maybe_unused]] auto isInternal,
-                                 const std::vector<std::string>& triples)
-      -> testing::Matcher<const ad_utility::HashMap<
-          IdTriple<0>,
-          typename DeltaTriples::TriplesToHandles<
-              decltype(isInternal)::value>::LocatedTripleHandles>&> {
-    return testing::ResultOf(
-        "mapKeys(...)", [&mapKeys](const auto map) { return mapKeys(map); },
-        testing::UnorderedElementsAreArray(
-            makeIdTriples(vocab, localVocab, triples)));
-  };
   // A matcher that checks the state of a `DeltaTriples`:
   // - `numInserted()` and `numDeleted()` and the derived `getCounts()`
   // - `numTriples()` for all `LocatedTriplesPerBlock`
   // - the inserted and deleted triples (unordered)
-  auto StateIs = [this, &vocab, &localVocab, &UnorderedTriplesAre](
+  auto StateIs = [this, &vocab, &localVocab](
                      size_t numInserted, size_t numDeleted,
                      size_t numTriplesInAllPermutations,
                      size_t numInternalInserted, size_t numInternalDeleted,
@@ -184,8 +168,8 @@ TEST_F(DeltaTriplesTest, insertTriplesAndDeleteTriples) {
                      const std::vector<std::string>& internalDeleted)
       -> testing::Matcher<const DeltaTriples&> {
     using ::testing::AllOf;
-    using TriplesNormal = DeltaTriples::TriplesToHandles<false>;
-    using TriplesInternal = DeltaTriples::TriplesToHandles<true>;
+    using TriplesNormal = DeltaTriples::TriplesSets<false>;
+    using TriplesInternal = DeltaTriples::TriplesSets<true>;
     return AllOf(
         NumTriples(numInserted, numDeleted, numTriplesInAllPermutations,
                    numInternalInserted, numInternalDeleted),
@@ -419,8 +403,8 @@ TEST_F(DeltaTriplesTest, insertTriplesAndDeleteTriples) {
                    std::vector<std::array<TripleComponent, 3>> internalDeleted)
       -> testing::Matcher<const DeltaTriples&> {
     using ::testing::AllOf;
-    using TriplesNormal = DeltaTriples::TriplesToHandles<false>;
-    using TriplesInternal = DeltaTriples::TriplesToHandles<true>;
+    using TriplesNormal = DeltaTriples::TriplesSets<false>;
+    using TriplesInternal = DeltaTriples::TriplesSets<true>;
     return AllOf(
         AD_FIELD(DeltaTriples, triplesToHandlesNormal_,
                  AllOf(AD_FIELD(TriplesNormal, triplesInserted_,
@@ -670,7 +654,8 @@ TEST_F(DeltaTriplesTest, DeltaTriplesManager) {
 TEST_F(DeltaTriplesTest, LocatedTriplesSharedState) {
   auto Snapshot = [](size_t index, size_t numTriples)
       -> testing::Matcher<const LocatedTriplesSharedState> {
-    auto m = AD_PROPERTY(LocatedTriplesPerBlock, numTriples, numTriples);
+    auto m =
+        AD_PROPERTY(LocatedTriplesPerBlock, numTriplesForTesting, numTriples);
     return testing::Pointee(testing::AllOf(
         AD_FIELD(LocatedTriplesState, index_, testing::Eq(index)),
         AD_FIELD(LocatedTriplesState, locatedTriplesPerBlock_,

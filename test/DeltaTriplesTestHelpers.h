@@ -39,7 +39,8 @@ inline auto InAllPermutations =
 // `DeltaTriples`.
 inline auto NumTriplesInAllPermutations =
     [](size_t expectedNumTriples) -> testing::Matcher<const DeltaTriples&> {
-  return InAllPermutations(AD_PROPERTY(LocatedTriplesPerBlock, numTriples,
+  return InAllPermutations(AD_PROPERTY(LocatedTriplesPerBlock,
+                                       numTriplesForTesting,
                                        testing::Eq(expectedNumTriples)));
 };
 // A matcher that checks `numInserted()`, `numDeleted()` and the derived

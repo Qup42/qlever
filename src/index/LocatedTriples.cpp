@@ -249,16 +249,13 @@ std::vector<std::vector<LocatedTriple>> split_into_categories(
 }
 
 // ____________________________________________________________________________
-std::vector<LocatedTriples::iterator> LocatedTriplesPerBlock::add(
-    std::vector<LocatedTriple> locatedTriples,
-    ad_utility::timer::TimeTracer& tracer) {
+void LocatedTriplesPerBlock::add(std::vector<LocatedTriple> locatedTriples,
+                                 ad_utility::timer::TimeTracer& tracer) {
   tracer.beginTrace("adding");
-  numTriples_ += locatedTriples.size();
   for (auto& locatedTriple : locatedTriples) {
     map_[locatedTriple.blockIndex_].insert(std::move(locatedTriple));
   }
   tracer.endTrace("adding");
-  return {};
 }
 
 // ____________________________________________________________________________
@@ -268,10 +265,17 @@ void LocatedTriplesPerBlock::erase(size_t blockIndex, LocatedTriple lt) {
                     " is not contained.");
   auto& block = blockIter->second;
   block.erase(lt);
-  numTriples_--;
   if (block.empty()) {
     map_.erase(blockIndex);
   }
+}
+
+// ____________________________________________________________________________
+size_t LocatedTriplesPerBlock::numTriplesForTesting() const {
+  auto sizes =
+      map_ | ql::views::values |
+      ql::views::transform([](const auto& block) { return block.size(); });
+  return std::accumulate(sizes.begin(), sizes.end(), 0);
 }
 
 // ____________________________________________________________________________

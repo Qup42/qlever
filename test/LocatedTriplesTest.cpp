@@ -49,7 +49,7 @@ auto numBlocks =
 
 auto numTriplesTotal =
     [](size_t numTriples) -> testing::Matcher<const LocatedTriplesPerBlock&> {
-  return AD_PROPERTY(LocatedTriplesPerBlock, LocatedTriplesPerBlock::numTriples,
+  return AD_PROPERTY(LocatedTriplesPerBlock, numTriplesForTesting,
                      testing::Eq(numTriples));
 };
 
@@ -152,7 +152,7 @@ TEST_F(LocatedTriplesTest, numTriplesInBlock) {
                                                          {1, {{LT4, LT5}}},
                                                          {3, {{LT6, LT7}}}}));
 
-  auto handles = locatedTriplesPerBlock.add(std::vector{LT8, LT9});
+  locatedTriplesPerBlock.add({LT8, LT9});
 
   EXPECT_THAT(locatedTriplesPerBlock, numBlocks(4));
   EXPECT_THAT(locatedTriplesPerBlock, numTriplesTotal(9));
@@ -745,9 +745,8 @@ TEST_F(LocatedTriplesTest, augmentedMetadata) {
                 testing::ElementsAreArray(expectedAugmentedMetadata));
 
     // T4 is before block 4. The beginning of block 4 changes.
-    auto handles =
-        locatedTriplesPerBlock.add(LocatedTriple::locateTriplesInPermutation(
-            Span{T4}, metadata, keyOrder, true, handle));
+    locatedTriplesPerBlock.add(LocatedTriple::locateTriplesInPermutation(
+        Span{T4}, metadata, keyOrder, true, handle));
     locatedTriplesPerBlock.updateAugmentedMetadata();
 
     expectedAugmentedMetadata[4] = CBM(T4.toPermutedTriple(), PT8);

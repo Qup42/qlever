@@ -222,13 +222,15 @@ struct SortedVector {
     triples_.erase(targetIt, triples_.end());
   }
 
-  size_t size() const { return triples_.size(); }
+  size_t size() const {
+    ensureIntegration();
+    return triples_.size();
+  }
   bool empty() const { return triples_.empty(); }
 
   QL_DEFINE_DEFAULTED_EQUALITY_OPERATOR(SortedVector, triples_);
 };
 
-// using LocatedTriples = std::set<LocatedTriple, LocatedTripleCompare>;
 using LocatedTriples = SortedVector;
 
 // This operator is only for debugging and testing. It returns a
@@ -239,9 +241,6 @@ std::ostream& operator<<(std::ostream& os, const LocatedTriples& lts);
 // located triples for a permutation.
 class LocatedTriplesPerBlock {
  private:
-  // The total number of `LocatedTriple` objects stored (for all blocks).
-  size_t numTriples_ = 0;
-
   // For each block with a non-empty set of located triples, the located triples
   // in that block.
   ad_utility::HashMap<size_t, LocatedTriples> map_;
@@ -276,7 +275,7 @@ class LocatedTriplesPerBlock {
   // small, this estimate is usually fine. We could get better estimates in
   // constant time by maintaining a counter for each of these two numbers in
   // `LocatedTriplesPerBlock` and update these counters for each update
-  // operatoin. However, note that that would still be an estimate because at
+  // operation. However, note that that would still be an estimate because at
   // this point we do not know whether an insertion or deletion is actually
   // effective.
   NumAddedAndDeleted numTriples(size_t blockIndex) const;
@@ -313,17 +312,10 @@ class LocatedTriplesPerBlock {
     return map_.contains(blockIndex);
   }
 
-  // Add `locatedTriples` to the `LocatedTriplesPerBlock` and return handles to
-  // where they were added (`LocatedTriples` is a sorted set, see above). Using
-  // these handles, we can easily remove the `locatedTriples` from the set again
-  // when we need to.
-  //
-  // PRECONDITION: The `locatedTriples` must not already exist in
-  // `LocatedTriplesPerBlock`.
-  std::vector<LocatedTriples::iterator> add(
-      std::vector<LocatedTriple> locatedTriples,
-      ad_utility::timer::TimeTracer& tracer =
-          ad_utility::timer::DEFAULT_TIME_TRACER);
+  // Add `locatedTriples` to the `LocatedTriplesPerBlock`.
+  void add(std::vector<LocatedTriple> locatedTriples,
+           ad_utility::timer::TimeTracer& tracer =
+               ad_utility::timer::DEFAULT_TIME_TRACER);
 
   // Removes the given `LocatedTriple` from the `LocatedTriplesPerBlock`.
   //
@@ -332,7 +324,7 @@ class LocatedTriplesPerBlock {
   void erase(size_t blockIndex, LocatedTriple lt);
 
   // Get the total number of `LocatedTriple`s (for all blocks).
-  size_t numTriples() const { return numTriples_; }
+  size_t numTriplesForTesting() const;
 
   // Get the number of blocks with a non-empty set of located triples.
   size_t numBlocks() const { return map_.size(); }
@@ -362,7 +354,6 @@ class LocatedTriplesPerBlock {
   // Remove all located triples.
   void clear() {
     map_.clear();
-    numTriples_ = 0;
     augmentedMetadata_.reset();
   }
 
