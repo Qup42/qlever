@@ -155,6 +155,8 @@ addLinkAndDiscoverTestSerial(IndexTest index)
 
 addLinkAndDiscoverTest(LocatedTriplesTest index)
 
+addLinkAndDiscoverTest(SortedVectorTest index)
+
 addLinkAndDiscoverTestSerial(IdTripleTest index)
 
 addLinkAndDiscoverTestSerial(DeltaTriplesTest index)
