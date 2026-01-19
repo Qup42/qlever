@@ -52,6 +52,179 @@ std::vector<LocatedTriple> LocatedTriple::locateTriplesInPermutation(
 }
 
 // ____________________________________________________________________________
+void SortedLocatedTriplesVector::zipSort() const {
+  auto sortedUntilIt = triples_.begin() + sortedUntil_;
+  std::stable_sort(sortedUntilIt, triples_.end(), LocatedTripleCompare{});
+  auto rit =
+      std::unique(triples_.rbegin(), triples_.rend() - sortedUntil_,
+                  [](const LocatedTriple& lt1, const LocatedTriple& lt2) {
+                    return lt1.triple_ == lt2.triple_;
+                  });
+  triples_.erase(sortedUntilIt, rit.base());
+  sortedUntilIt = triples_.begin() + sortedUntil_;
+
+  storage merged;
+  merged.reserve(triples_.size());
+
+  LocatedTripleCompare lt;
+
+  auto largeIt = triples_.begin();
+  auto smallIt = sortedUntilIt;
+
+  while (largeIt != sortedUntilIt && smallIt != triples_.end()) {
+    if (lt(*largeIt, *smallIt)) {
+      merged.push_back(std::move(*largeIt));
+      ++largeIt;
+    } else if (lt(*smallIt, *largeIt)) {
+      merged.push_back(std::move(*smallIt));
+      ++smallIt;
+    } else {
+      // For equal triples the new element overrides the old one.
+      merged.push_back(std::move(*smallIt));
+      ++smallIt;
+      ++largeIt;
+    }
+  }
+
+  std::copy(largeIt, sortedUntilIt, std::back_inserter(merged));
+  std::copy(smallIt, triples_.end(), std::back_inserter(merged));
+
+  triples_.swap(merged);
+}
+
+// ____________________________________________________________________________
+SortedLocatedTriplesVector SortedLocatedTriplesVector::fromSorted(
+    std::vector<LocatedTriple> sortedTriples) {
+  AD_EXPENSIVE_CHECK(
+      ql::ranges::is_sorted(sortedTriples, LocatedTripleCompare{}));
+  SortedLocatedTriplesVector vec;
+  vec.sortedUntil_ = sortedTriples.size();
+  vec.triples_ = std::move(sortedTriples);
+  vec.dirty_ = false;
+  return vec;
+}
+
+// ____________________________________________________________________________
+void SortedLocatedTriplesVector::ensureIntegration() const {
+  if (dirty_) {
+    if (triples_.size() > 5000) {
+      zipSort();
+    } else {
+      ql::ranges::stable_sort(triples_, LocatedTripleCompare{});
+      auto rit =
+          std::unique(triples_.rbegin(), triples_.rend(),
+                      [](const LocatedTriple& lt1, const LocatedTriple& lt2) {
+                        return lt1.triple_ == lt2.triple_;
+                      });
+      triples_.erase(triples_.begin(), rit.base());
+    }
+    sortedUntil_ = triples_.size();
+    dirty_ = false;
+  }
+}
+
+// ____________________________________________________________________________
+void SortedLocatedTriplesVector::insert(LocatedTriple lt) {
+  triples_.push_back(std::move(lt));
+  dirty_ = true;
+}
+
+// ____________________________________________________________________________
+SortedLocatedTriplesVector::iterator SortedLocatedTriplesVector::begin() {
+  ensureIntegration();
+  return triples_.begin();
+}
+
+// ____________________________________________________________________________
+SortedLocatedTriplesVector::const_iterator SortedLocatedTriplesVector::begin()
+    const {
+  ensureIntegration();
+  return triples_.begin();
+}
+
+// ____________________________________________________________________________
+SortedLocatedTriplesVector::const_reverse_iterator
+SortedLocatedTriplesVector::rbegin() const {
+  ensureIntegration();
+  return triples_.rbegin();
+}
+
+// ____________________________________________________________________________
+SortedLocatedTriplesVector::iterator SortedLocatedTriplesVector::end() {
+  ensureIntegration();
+  return triples_.end();
+}
+
+// ____________________________________________________________________________
+SortedLocatedTriplesVector::const_iterator SortedLocatedTriplesVector::end()
+    const {
+  ensureIntegration();
+  return triples_.end();
+}
+
+// ____________________________________________________________________________
+SortedLocatedTriplesVector::const_reverse_iterator
+SortedLocatedTriplesVector::rend() const {
+  ensureIntegration();
+  return triples_.rend();
+}
+
+// ____________________________________________________________________________
+void SortedLocatedTriplesVector::erase(const LocatedTriple& it) {
+  auto iter = ql::ranges::find(triples_, it);
+  triples_.erase(iter);
+}
+
+// ____________________________________________________________________________
+void SortedLocatedTriplesVector::erase_range(std::vector<LocatedTriple> its) {
+  ql::ranges::sort(its, LocatedTripleCompare{});
+
+  auto targetIt = triples_.begin();
+  auto elemIt = triples_.begin();
+  auto deletionIt = its.begin();
+  LocatedTripleCompare comp;
+
+  while (elemIt != triples_.end() && deletionIt != its.end()) {
+    // elem < deletion
+    if (comp(*elemIt, *deletionIt)) {
+      if (targetIt != elemIt) {
+        *targetIt = std::move(*elemIt);
+      }
+      ++targetIt;
+      ++elemIt;
+    }
+    // deletion < elem
+    else if (comp(*deletionIt, *elemIt)) {
+      ++deletionIt;
+      // elem == deletion
+    } else {
+      ++elemIt;
+      ++deletionIt;
+    }
+  }
+  // ql::ranges::copy(elemIt, triples_.end(), targetIt);
+  if (deletionIt == its.end()) {
+    while (elemIt != triples_.end()) {
+      if (targetIt != elemIt) {
+        *targetIt = std::move(*elemIt);
+      }
+      ++targetIt;
+      ++elemIt;
+    }
+  }
+  triples_.erase(targetIt, triples_.end());
+}
+
+// ____________________________________________________________________________
+size_t SortedLocatedTriplesVector::size() const {
+  ensureIntegration();
+  return triples_.size();
+}
+
+// ____________________________________________________________________________
+bool SortedLocatedTriplesVector::empty() const { return triples_.empty(); }
+
+// ____________________________________________________________________________
 bool LocatedTriplesPerBlock::hasUpdates(size_t blockIndex) const {
   return map_.contains(blockIndex);
 }

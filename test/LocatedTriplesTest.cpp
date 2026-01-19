@@ -108,14 +108,16 @@ TEST_F(LocatedTriplesTest, numTriplesInBlock) {
 
   auto locatedTriplesAre =
       [&locatedTriplesInBlock](
-          const ad_utility::HashMap<size_t, LocatedTriples>&
+          const ad_utility::HashMap<size_t, std::vector<LocatedTriple>>&
               locatedTriplesBlockwise) {
         auto blockMatchers = ad_utility::transform(
             locatedTriplesBlockwise,
             [&locatedTriplesInBlock](
                 auto p) -> testing::Matcher<const LocatedTriplesPerBlock&> {
               auto [blockIndex, expectedLTs] = p;
-              return locatedTriplesInBlock(blockIndex, expectedLTs);
+              return locatedTriplesInBlock(
+                  blockIndex,
+                  SortedLocatedTriplesVector::fromSorted(expectedLTs));
             });
         // The macro does not work with templated types.
         using HashMapType = ad_utility::HashMap<size_t, LocatedTriples>;

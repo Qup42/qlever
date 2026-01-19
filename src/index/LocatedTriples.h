@@ -79,159 +79,45 @@ struct LocatedTripleCompare {
   }
 };
 
-struct SortedVector {
-  mutable std::vector<LocatedTriple> triples_;
+class SortedLocatedTriplesVector {
+  using storage = std::vector<LocatedTriple>;
+  mutable storage triples_ = {};
   mutable size_t sortedUntil_ = 0;
-  mutable bool dirty_ = true;
+  mutable bool dirty_ = false;
 
-  using iterator = std::vector<LocatedTriple>::iterator;
-  using const_iterator = std::vector<LocatedTriple>::const_iterator;
-  using const_reverse_iterator =
-      std::vector<LocatedTriple>::const_reverse_iterator;
+  using iterator = storage::iterator;
+  using const_iterator = storage::const_iterator;
+  using const_reverse_iterator = storage::const_reverse_iterator;
 
-  void zipSort() const {
-    auto sortedUntilIt = triples_.begin() + sortedUntil_;
-    std::stable_sort(sortedUntilIt, triples_.end(), LocatedTripleCompare{});
-    auto rit =
-        std::unique(triples_.rbegin(), triples_.rend() - sortedUntil_,
-                    [](const LocatedTriple& lt1, const LocatedTriple& lt2) {
-                      return lt1.triple_ == lt2.triple_;
-                    });
-    triples_.erase(sortedUntilIt, rit.base());
+  void zipSort() const;
 
-    std::vector<LocatedTriple> merged;
-    merged.reserve(triples_.size());
+ public:
+  SortedLocatedTriplesVector() : triples_(), sortedUntil_(0), dirty_(false) {}
 
-    LocatedTripleCompare comp;
+  static SortedLocatedTriplesVector fromSorted(
+      std::vector<LocatedTriple> sortedTriples);
 
-    auto largeIt = triples_.begin();
-    auto smallIt = sortedUntilIt;
+  void ensureIntegration() const;
 
-    while (largeIt != sortedUntilIt && smallIt != triples_.end()) {
-      if (comp(*largeIt, *smallIt)) {
-        merged.push_back(std::move(*largeIt));
-        ++largeIt;
-      } else if (comp(*smallIt, *largeIt)) {
-        merged.push_back(std::move(*smallIt));
-        ++smallIt;
-      } else {
-        merged.push_back(std::move(*smallIt));
-        ++smallIt;
-        ++largeIt;
-      }
-    }
+  void insert(LocatedTriple lt);
 
-    std::copy(largeIt, sortedUntilIt, std::back_inserter(merged));
-    std::copy(smallIt, triples_.end(), std::back_inserter(merged));
+  iterator begin();
+  const_iterator begin() const;
+  const_reverse_iterator rbegin() const;
+  iterator end();
+  const_iterator end() const;
+  const_reverse_iterator rend() const;
 
-    triples_.swap(merged);
-  }
+  void erase(const LocatedTriple& it);
+  void erase_range(std::vector<LocatedTriple> its);
 
-  void ensureIntegration() const {
-    if (dirty_) {
-      if (triples_.size() > 5000) {
-        AD_LOG_INFO << "Sorting large LocatedTriples Block #"
-                    << triples_.front().blockIndex_ << " with " << sortedUntil_
-                    << " old and " << triples_.size() - sortedUntil_
-                    << " new entries." << std::endl;
-        zipSort();
-      } else {
-        ql::ranges::stable_sort(triples_, LocatedTripleCompare{});
-        auto rit =
-            std::unique(triples_.rbegin(), triples_.rend(),
-                        [](const LocatedTriple& lt1, const LocatedTriple& lt2) {
-                          return lt1.triple_ == lt2.triple_;
-                        });
-        triples_.erase(triples_.begin(), rit.base());
-      }
-      sortedUntil_ = triples_.size();
-      dirty_ = false;
-    }
-  }
+  size_t size() const;
+  bool empty() const;
 
-  void insert(LocatedTriple lt) {
-    triples_.push_back(std::move(lt));
-    dirty_ = true;
-  }
-
-  iterator begin() {
-    ensureIntegration();
-    return triples_.begin();
-  }
-  const_iterator begin() const {
-    ensureIntegration();
-    return triples_.begin();
-  }
-  const_reverse_iterator rbegin() const {
-    ensureIntegration();
-    return triples_.rbegin();
-  }
-  iterator end() {
-    ensureIntegration();
-    return triples_.end();
-  }
-  const_iterator end() const {
-    ensureIntegration();
-    return triples_.end();
-  }
-  const_reverse_iterator rend() const {
-    ensureIntegration();
-    return triples_.rend();
-  }
-
-  void erase(const LocatedTriple& it) {
-    auto iter = ql::ranges::find(triples_, it);
-    triples_.erase(iter);
-  }
-  void erase_range(std::vector<LocatedTriple> its) {
-    ql::ranges::sort(its, LocatedTripleCompare{});
-
-    auto targetIt = triples_.begin();
-    auto elemIt = triples_.begin();
-    auto deletionIt = its.begin();
-    LocatedTripleCompare comp;
-
-    while (elemIt != triples_.end() && deletionIt != its.end()) {
-      // elem < deletion
-      if (comp(*elemIt, *deletionIt)) {
-        if (targetIt != elemIt) {
-          *targetIt = std::move(*elemIt);
-        }
-        ++targetIt;
-        ++elemIt;
-      }
-      // deletion < elem
-      else if (comp(*deletionIt, *elemIt)) {
-        ++deletionIt;
-        // elem == deletion
-      } else {
-        ++elemIt;
-        ++deletionIt;
-      }
-    }
-    // ql::ranges::copy(elemIt, triples_.end(), targetIt);
-    if (deletionIt == its.end()) {
-      while (elemIt != triples_.end()) {
-        if (targetIt != elemIt) {
-          *targetIt = std::move(*elemIt);
-        }
-        ++targetIt;
-        ++elemIt;
-      }
-    }
-    triples_.erase(targetIt, triples_.end());
-  }
-
-  size_t size() const {
-    ensureIntegration();
-    return triples_.size();
-  }
-  bool empty() const { return triples_.empty(); }
-
-  QL_DEFINE_DEFAULTED_EQUALITY_OPERATOR(SortedVector, triples_);
+  QL_DEFINE_DEFAULTED_EQUALITY_OPERATOR(SortedLocatedTriplesVector, triples_);
 };
 
-using LocatedTriples = SortedVector;
+using LocatedTriples = SortedLocatedTriplesVector;
 
 // This operator is only for debugging and testing. It returns a
 // human-readable representation.
