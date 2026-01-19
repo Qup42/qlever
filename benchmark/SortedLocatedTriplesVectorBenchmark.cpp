@@ -7,7 +7,6 @@
 // You may not use this file except in compliance with the Apache 2.0 License,
 // which can be found in the `LICENSE` file at the root of the QLever project.
 
-
 #include <algorithm>
 #include <set>
 #include <string>
@@ -148,9 +147,7 @@ class SortedLocatedTriplesVectorBenchmark : public BenchmarkInterface {
         });
 
         // Column 2: Vector Integration (measure only ensureIntegration)
-        table.addMeasurement(nIdx, 2, [&]() {
-          vec.ensureIntegration();
-        });
+        table.addMeasurement(nIdx, 2, [&]() { vec.ensureIntegration(); });
 
         // Column 3: Set Insertion (insert M items one-by-one)
         std::set<LocatedTriple, LocatedTripleCompare> s(preExisting.begin(),
