@@ -130,6 +130,27 @@ class LocatedTriplesPerBlock {
   // effective.
   NumAddedAndDeleted numTriples(size_t blockIndex) const;
 
+  // Get the exact number of inserted and deleted located triples for the given
+  // block by iterating through the set. This is more expensive than
+  // `numTriples()` but provides accurate separate counts for inserts and
+  // deletes.
+  NumAddedAndDeleted numTriplesDetailed(size_t blockIndex) const {
+    if (!map_.contains(blockIndex)) {
+      return {0, 0};
+    }
+    const auto& locatedTriples = map_.at(blockIndex);
+    size_t numInserted = 0;
+    size_t numDeleted = 0;
+    for (const auto& lt : locatedTriples) {
+      if (lt.insertOrDelete_) {
+        ++numInserted;
+      } else {
+        ++numDeleted;
+      }
+    }
+    return {numInserted, numDeleted};
+  }
+
   // Returns whether there are updates triples for the block with the index
   // `blockIndex`.
   bool hasUpdates(size_t blockIndex) const;

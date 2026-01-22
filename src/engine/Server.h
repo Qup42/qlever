@@ -347,6 +347,10 @@ class Server {
       ad_utility::SharedCancellationHandle cancellationHandle,
       TimeLimit timeLimit);
   FRIEND_TEST(MaterializedViewsTest, serverIntegration);
+
+  // Helper function to resolve a ValueID to its string representation.
+  // Resolves VocabIndex and LocalVocabIndex types, uses operator<< for others.
+  std::string resolveValueId(Id id) const;
 };
 
 #endif  // QLEVER_SRC_ENGINE_SERVER_H

@@ -472,6 +472,153 @@ CPP_template_def(typename RequestT, typename ResponseT)(
           mapToJson(locatedTriples.getBlockSizes());
     }
     response = createJsonResponse(jsonResponse, request);
+  } else if (auto cmd = checkParameter("cmd", "inspect-block")) {
+    requireValidAccessToken("inspect-block");
+    logCommand(cmd, "inspecting block internals");
+
+    // Helper structure for parsed permutation
+    struct ParsedPermutation {
+      Permutation::Enum permutation;
+      bool isInternal;
+    };
+
+    // Helper function to parse permutation string
+    auto parsePermutation = [](std::string_view str)
+        -> std::optional<ParsedPermutation> {
+      bool isInternal = false;
+      std::string_view permStr = str;
+
+      // Check if it ends with 'I' for internal
+      if (str.size() > 1 && str.back() == 'I') {
+        isInternal = true;
+        permStr = str.substr(0, str.size() - 1);  // Remove the 'I'
+      }
+
+      // Parse the base permutation
+      Permutation::Enum perm;
+      if (permStr == "PSO") {
+        perm = Permutation::Enum::PSO;
+      } else if (permStr == "POS") {
+        perm = Permutation::Enum::POS;
+      } else if (permStr == "SPO") {
+        perm = Permutation::Enum::SPO;
+      } else if (permStr == "SOP") {
+        perm = Permutation::Enum::SOP;
+      } else if (permStr == "OPS") {
+        perm = Permutation::Enum::OPS;
+      } else if (permStr == "OSP") {
+        perm = Permutation::Enum::OSP;
+      } else {
+        return std::nullopt;  // Invalid permutation
+      }
+
+      // Validate: only PSO and POS can be internal
+      if (isInternal && perm != Permutation::Enum::PSO &&
+          perm != Permutation::Enum::POS) {
+        return std::nullopt;  // Invalid: only PSOI and POSI are valid internal
+                              // permutations
+      }
+
+      return ParsedPermutation{perm, isInternal};
+    };
+
+    // Helper function to convert triple to string
+    auto tripleToString = [this](
+        const CompressedBlockMetadataNoBlockIndex::PermutedTriple& triple) {
+      std::ostringstream oss;
+      oss << "Triple: "
+          << resolveValueId(triple.col0Id_) << ' '
+          << resolveValueId(triple.col1Id_) << ' '
+          << resolveValueId(triple.col2Id_) << ' '
+          << resolveValueId(triple.graphId_);
+      return oss.str();
+    };
+
+    // Extract and validate parameters
+    std::optional<std::string> permutationStr = checkParameter("permutation", std::nullopt);
+    std::optional<std::string> blockIndexStr = checkParameter("blockIndex", std::nullopt);
+
+    if (!permutationStr.has_value() || permutationStr.value().empty()) {
+      throw std::runtime_error(
+          "Missing or empty 'permutation' parameter. Valid options: PSO, "
+          "PSOI, POS, POSI, SPO, SOP, OPS, OSP");
+    }
+
+    if (!blockIndexStr.has_value() || blockIndexStr.value().empty()) {
+      throw std::runtime_error("Missing or empty 'blockIndex' parameter");
+    }
+
+    // Parse permutation
+    auto parsedPerm = parsePermutation(permutationStr.value());
+    if (!parsedPerm.has_value()) {
+      throw std::runtime_error(
+          "Invalid permutation. Valid options: PSO, PSOI, POS, POSI, SPO, "
+          "SOP, OPS, OSP");
+    }
+
+    // Parse block index
+    size_t blockIndex;
+    try {
+      blockIndex = std::stoull(blockIndexStr.value());
+    } catch (const std::exception&) {
+      throw std::runtime_error(
+          absl::StrCat("Invalid blockIndex: ", blockIndexStr.value()));
+    }
+
+    // Get located triples state
+    auto locatedTriplesState =
+        index_.deltaTriplesManager().getCurrentLocatedTriplesSharedState();
+
+    // Get block data for the specified permutation
+    const auto& locatedTriples =
+        parsedPerm->isInternal
+            ? locatedTriplesState->getLocatedTriplesForPermutation<true>(
+                  parsedPerm->permutation)
+            : locatedTriplesState->getLocatedTriplesForPermutation<false>(
+                  parsedPerm->permutation);
+
+    // Get block metadata and validate blockIndex
+    const auto& blockMetadata = locatedTriples.getAugmentedMetadata();
+    if (blockIndex >= blockMetadata.size()) {
+      throw std::out_of_range(
+          absl::StrCat("Block index ", blockIndex,
+                       " out of range (total blocks: ", blockMetadata.size(),
+                       ")"));
+    }
+
+    // Get update counts
+    auto updateCounts = locatedTriples.numTriplesDetailed(blockIndex);
+    size_t totalUpdates = updateCounts.numAdded_ + updateCounts.numDeleted_;
+
+    // Get original index triple count
+    size_t originalTripleCount = blockMetadata[blockIndex].numRows_;
+
+    // Get first and last triple strings
+    const auto& firstTriple = blockMetadata[blockIndex].firstTriple_;
+    const auto& lastTriple = blockMetadata[blockIndex].lastTriple_;
+    std::string firstTripleStr = tripleToString(firstTriple);
+    std::string lastTripleStr = tripleToString(lastTriple);
+
+    // Build JSON response
+    nlohmann::json result;
+
+    // Build permutation string with "I" suffix if internal
+    std::string permutationResponse =
+        std::string{Permutation::toString(parsedPerm->permutation)};
+    if (parsedPerm->isInternal) {
+      permutationResponse += "I";
+    }
+
+    result["permutation"] = permutationResponse;
+    result["blockIndex"] = blockIndex;
+    result["updates"] = {{"inserts", updateCounts.numAdded_},
+                         {"deletes", updateCounts.numDeleted_},
+                         {"total", totalUpdates}};
+    result["originalTriples"] = originalTripleCount;
+    result["firstTriple"] = firstTripleStr;
+    result["lastTriple"] = lastTripleStr;
+
+    response = createJsonResponse(result, request);
   } else if (auto cmd = checkParameter("cmd", "get-settings")) {
     logCommand(cmd, "get server settings");
     response = createJsonResponse(
@@ -788,6 +935,35 @@ nlohmann::json Server::composeErrorResponseJson(
   }
 
   return j;
+}
+
+// _____________________________________________________________________________
+std::string Server::resolveValueId(Id id) const {
+  using enum Datatype;
+
+  switch (id.getDatatype()) {
+    case VocabIndex:
+      try {
+        return std::string(index().getVocab()[id.getVocabIndex()]);
+      } catch (const std::exception& e) {
+        return absl::StrCat("InvalidVocabIndex:", id.getVocabIndex().get());
+      }
+
+    case LocalVocabIndex: {
+      ::LocalVocabIndex localIdx = id.getLocalVocabIndex();
+      if (localIdx != nullptr) {
+        return localIdx->toStringRepresentation();
+      }
+      return "NullLocalVocabIndex";
+    }
+
+    default: {
+      // Use operator<< for all other types
+      std::ostringstream oss;
+      oss << id;
+      return oss.str();
+    }
+  }
 }
 
 // _____________________________________________________________________________
