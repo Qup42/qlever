@@ -115,8 +115,9 @@ class SortedLocatedTriplesVectorBenchmark : public BenchmarkInterface {
 
       // Column names
       std::vector<std::string> columnNames = {
-          "N items",     "Vector: Insert only", "Vector: Integration",
-          "Set: Insert", "Vector: Copy",        "Set: Copy"};
+          "N items",         "Vector: Insert only", "Vector: Integration",
+          "Set: Insert",     "Vector: Copy",        "Set: Copy",
+          "Set: Copy (slow)"};
 
       // Create table
       std::string tableName = "M=" + std::to_string(M) + " items inserted";
@@ -171,6 +172,17 @@ class SortedLocatedTriplesVectorBenchmark : public BenchmarkInterface {
         table.addMeasurement(nIdx, 5, [&]() {
           // Measure only the copy
           std::set<LocatedTriple, LocatedTripleCompare> copy = s;
+
+          // Use result to prevent optimization
+          volatile size_t dummy = copy.size();
+          (void)dummy;
+        });
+
+        // Column 6: Set Copy (purposefully slow)
+        table.addMeasurement(nIdx, 6, [&]() {
+          // Measure only the copy
+          std::set<LocatedTriple, LocatedTripleCompare> copy(s.begin(),
+                                                             s.end());
 
           // Use result to prevent optimization
           volatile size_t dummy = copy.size();
