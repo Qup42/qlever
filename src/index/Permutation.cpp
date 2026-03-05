@@ -61,6 +61,42 @@ void Permutation::loadFromDisk(const std::string& onDiskBase,
   AD_LOG_INFO << "Registered " << readableName_
               << " permutation: " << meta_.statistics() << std::endl;
   isLoaded_ = true;
+
+  if (filename != "olympics.index.pso") {
+    return;
+  }
+  size_t i = 66;
+  auto originalBlockData = meta_.blockData();
+  auto& blockBeingModified = originalBlockData[i];
+  ScanSpecification scanSpec{std::nullopt, std::nullopt, std::nullopt};
+  auto cancellationHandle =
+      std::make_shared<ad_utility::CancellationHandle<>>();
+  std::vector<ColumnIndex> additionalColumns{ADDITIONAL_COLUMN_GRAPH_ID};
+  auto idTable = ad_utility::getSingleElement(
+      reader_->lazyScan(scanSpec, {blockBeingModified}, additionalColumns,
+                        cancellationHandle, {}));
+  auto firstCol0Id = idTable.at(0, 0);
+  auto lastCol0Id = idTable.at(idTable.numRows() - 1, 0);
+  file.open(filename, "r+");
+  off_t metaFrom;
+  off_t metaTo = file.getLastOffset(&metaFrom);
+  // +1 to be sure and didn't want to think about it
+  file.truncate(metaFrom);
+  file.seek(metaFrom, SEEK_SET);
+  auto writer = std::make_unique<CompressedRelationWriter>(
+      NumColumnsIndexBuilding, std::move(file),
+      UNCOMPRESSED_BLOCKSIZE_COMPRESSED_METADATA_PER_COLUMN);
+  writer->compressAndWriteBlock(firstCol0Id, lastCol0Id, std::move(idTable),
+                                false);
+  auto newBlocks = std::move(*writer).getFinishedBlocks();
+  AD_CORRECTNESS_CHECK(newBlocks.size() == 1);
+  auto newBlock = newBlocks[0];
+  newBlock.blockIndex_ = i;
+  originalBlockData[i] = std::move(newBlock);
+  meta_.blockData() = originalBlockData;
+  file.open(filename, "r+");
+  meta_.appendToFile(&file);
+  file.close();
 }
 
 // _____________________________________________________________________________

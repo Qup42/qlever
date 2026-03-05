@@ -279,6 +279,8 @@ AD_SERIALIZE_FUNCTION(CompressedRelationMetadata) {
 /// Manage the compression and serialization of relations during the index
 /// build.
 class CompressedRelationWriter {
+  friend class Permutation;
+
  private:
   ad_utility::Synchronized<ad_utility::File> outfile_;
   ad_utility::Synchronized<std::vector<CompressedBlockMetadataNoBlockIndex>>

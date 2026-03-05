@@ -129,6 +129,11 @@ class File {
 
   void flush() { fflush(file_); }
 
+  int truncate(off_t newSize) {
+    assert(file_);
+    return ftruncate(fileno(file_), newSize);
+  }
+
   //! Seeks a position in the file.
   //! Sets the file position indicator for the stream.
   //! The new position is obtained by adding seekOffset
