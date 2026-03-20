@@ -483,8 +483,8 @@ CPP_template_def(typename RequestT, typename ResponseT)(
     };
 
     // Helper function to parse permutation string
-    auto parsePermutation = [](std::string_view str)
-        -> std::optional<ParsedPermutation> {
+    auto parsePermutation =
+        [](std::string_view str) -> std::optional<ParsedPermutation> {
       bool isInternal = false;
       std::string_view permStr = str;
 
@@ -523,20 +523,22 @@ CPP_template_def(typename RequestT, typename ResponseT)(
     };
 
     // Helper function to convert triple to string
-    auto tripleToString = [this](
-        const CompressedBlockMetadataNoBlockIndex::PermutedTriple& triple) {
-      std::ostringstream oss;
-      oss << "Triple: "
-          << resolveValueId(triple.col0Id_) << ' '
-          << resolveValueId(triple.col1Id_) << ' '
-          << resolveValueId(triple.col2Id_) << ' '
-          << resolveValueId(triple.graphId_);
-      return oss.str();
-    };
+    auto tripleToString =
+        [this](
+            const CompressedBlockMetadataNoBlockIndex::PermutedTriple& triple) {
+          std::ostringstream oss;
+          oss << "Triple: " << resolveValueId(triple.col0Id_) << ' '
+              << resolveValueId(triple.col1Id_) << ' '
+              << resolveValueId(triple.col2Id_) << ' '
+              << resolveValueId(triple.graphId_);
+          return oss.str();
+        };
 
     // Extract and validate parameters
-    std::optional<std::string> permutationStr = checkParameter("permutation", std::nullopt);
-    std::optional<std::string> blockIndexStr = checkParameter("blockIndex", std::nullopt);
+    std::optional<std::string> permutationStr =
+        checkParameter("permutation", std::nullopt);
+    std::optional<std::string> blockIndexStr =
+        checkParameter("blockIndex", std::nullopt);
 
     if (!permutationStr.has_value() || permutationStr.value().empty()) {
       throw std::runtime_error(
@@ -580,10 +582,9 @@ CPP_template_def(typename RequestT, typename ResponseT)(
     // Get block metadata and validate blockIndex
     const auto& blockMetadata = locatedTriples.getAugmentedMetadata();
     if (blockIndex >= blockMetadata.size()) {
-      throw std::out_of_range(
-          absl::StrCat("Block index ", blockIndex,
-                       " out of range (total blocks: ", blockMetadata.size(),
-                       ")"));
+      throw std::out_of_range(absl::StrCat(
+          "Block index ", blockIndex,
+          " out of range (total blocks: ", blockMetadata.size(), ")"));
     }
 
     // Get update counts
@@ -952,7 +953,7 @@ std::string Server::resolveValueId(Id id) const {
     case LocalVocabIndex: {
       ::LocalVocabIndex localIdx = id.getLocalVocabIndex();
       if (localIdx != nullptr) {
-        return localIdx->toStringRepresentation();
+        return absl::StrCat("LVI(", localIdx->toStringRepresentation(), ")");
       }
       return "NullLocalVocabIndex";
     }
