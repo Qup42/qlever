@@ -385,6 +385,52 @@ CPP_template_def(typename RequestT, typename ResponseT)(
     }
   };
 
+  // Helper structure for parsed permutation
+  struct ParsedPermutation {
+    Permutation::Enum permutation;
+    bool isInternal;
+  };
+
+  // Helper function to parse permutation string
+  auto parsePermutation =
+      [](std::string_view str) -> std::optional<ParsedPermutation> {
+    bool isInternal = false;
+    std::string_view permStr = str;
+
+    // Check if it ends with 'I' for internal
+    if (str.size() > 1 && str.back() == 'I') {
+      isInternal = true;
+      permStr = str.substr(0, str.size() - 1);  // Remove the 'I'
+    }
+
+    // Parse the base permutation
+    Permutation::Enum perm;
+    if (permStr == "PSO") {
+      perm = Permutation::Enum::PSO;
+    } else if (permStr == "POS") {
+      perm = Permutation::Enum::POS;
+    } else if (permStr == "SPO") {
+      perm = Permutation::Enum::SPO;
+    } else if (permStr == "SOP") {
+      perm = Permutation::Enum::SOP;
+    } else if (permStr == "OPS") {
+      perm = Permutation::Enum::OPS;
+    } else if (permStr == "OSP") {
+      perm = Permutation::Enum::OSP;
+    } else {
+      return std::nullopt;  // Invalid permutation
+    }
+
+    // Validate: only PSO and POS can be internal
+    if (isInternal && perm != Permutation::Enum::PSO &&
+        perm != Permutation::Enum::POS) {
+      return std::nullopt;  // Invalid: only PSOI and POSI are valid internal
+                            // permutations
+    }
+
+    return ParsedPermutation{perm, isInternal};
+  };
+
   // Process all URL parameters known to QLever. If there is more than one,
   // QLever processes all of them, but only returns the result from the last
   // one. In particular, if there is a "query" parameter, it will be processed
@@ -475,52 +521,6 @@ CPP_template_def(typename RequestT, typename ResponseT)(
   } else if (auto cmd = checkParameter("cmd", "inspect-block")) {
     requireValidAccessToken("inspect-block");
     logCommand(cmd, "inspecting block internals");
-
-    // Helper structure for parsed permutation
-    struct ParsedPermutation {
-      Permutation::Enum permutation;
-      bool isInternal;
-    };
-
-    // Helper function to parse permutation string
-    auto parsePermutation =
-        [](std::string_view str) -> std::optional<ParsedPermutation> {
-      bool isInternal = false;
-      std::string_view permStr = str;
-
-      // Check if it ends with 'I' for internal
-      if (str.size() > 1 && str.back() == 'I') {
-        isInternal = true;
-        permStr = str.substr(0, str.size() - 1);  // Remove the 'I'
-      }
-
-      // Parse the base permutation
-      Permutation::Enum perm;
-      if (permStr == "PSO") {
-        perm = Permutation::Enum::PSO;
-      } else if (permStr == "POS") {
-        perm = Permutation::Enum::POS;
-      } else if (permStr == "SPO") {
-        perm = Permutation::Enum::SPO;
-      } else if (permStr == "SOP") {
-        perm = Permutation::Enum::SOP;
-      } else if (permStr == "OPS") {
-        perm = Permutation::Enum::OPS;
-      } else if (permStr == "OSP") {
-        perm = Permutation::Enum::OSP;
-      } else {
-        return std::nullopt;  // Invalid permutation
-      }
-
-      // Validate: only PSO and POS can be internal
-      if (isInternal && perm != Permutation::Enum::PSO &&
-          perm != Permutation::Enum::POS) {
-        return std::nullopt;  // Invalid: only PSOI and POSI are valid internal
-                              // permutations
-      }
-
-      return ParsedPermutation{perm, isInternal};
-    };
 
     // Helper function to convert triple to string
     auto tripleToString =
@@ -620,6 +620,86 @@ CPP_template_def(typename RequestT, typename ResponseT)(
     result["lastTriple"] = lastTripleStr;
 
     response = createJsonResponse(result, request);
+  } else if (auto cmd = checkParameter("cmd", "dump-updates")) {
+    requireValidAccessToken("inspect-block");
+    logCommand(cmd, "dumping updates in block");
+
+    // Helper function to convert triple to string
+    auto tripleToString = [this](const LocatedTriple& triple) {
+      std::ostringstream oss;
+      auto [s, p, o, g] = triple.triple_.ids();
+      oss << "Triple: " << triple.insertOrDelete_ << " " << resolveValueId(s)
+          << ' ' << resolveValueId(p) << ' ' << resolveValueId(o) << ' '
+          << resolveValueId(g);
+      return oss.str();
+    };
+    auto tripleToStringInternal = [](const LocatedTriple& triple) {
+      std::ostringstream oss;
+      auto [s, p, o, g] = triple.triple_.ids();
+      oss << "Triple: " << triple.insertOrDelete_ << " " << s << ' ' << p << ' '
+          << o << ' ' << g;
+      return oss.str();
+    };
+
+    // Extract and validate parameters
+    std::optional<std::string> permutationStr =
+        checkParameter("permutation", std::nullopt);
+    std::optional<std::string> blockIndexStr =
+        checkParameter("blockIndex", std::nullopt);
+    std::optional<std::string> internalRepr =
+        checkParameter("internalRepr", std::nullopt);
+
+    if (!permutationStr.has_value() || permutationStr.value().empty()) {
+      throw std::runtime_error(
+          "Missing or empty 'permutation' parameter. Valid options: PSO, "
+          "PSOI, POS, POSI, SPO, SOP, OPS, OSP");
+    }
+
+    if (!blockIndexStr.has_value() || blockIndexStr.value().empty()) {
+      throw std::runtime_error("Missing or empty 'blockIndex' parameter");
+    }
+
+    // Parse permutation
+    auto parsedPerm = parsePermutation(permutationStr.value());
+    if (!parsedPerm.has_value()) {
+      throw std::runtime_error(
+          "Invalid permutation. Valid options: PSO, PSOI, POS, POSI, SPO, "
+          "SOP, OPS, OSP");
+    }
+
+    // Parse block index
+    size_t blockIndex;
+    try {
+      blockIndex = std::stoull(blockIndexStr.value());
+    } catch (const std::exception&) {
+      throw std::runtime_error(
+          absl::StrCat("Invalid blockIndex: ", blockIndexStr.value()));
+    }
+
+    // Get located triples state
+    auto locatedTriplesState =
+        index_.deltaTriplesManager().getCurrentLocatedTriplesSharedState();
+
+    // Get block data for the specified permutation
+    const auto& locatedTriples =
+        parsedPerm->isInternal
+            ? locatedTriplesState->getLocatedTriplesForPermutation<true>(
+                  parsedPerm->permutation)
+            : locatedTriplesState->getLocatedTriplesForPermutation<false>(
+                  parsedPerm->permutation);
+
+    const auto& triples = locatedTriples.map_.at(blockIndex);
+
+    std::ostringstream oss;
+    for (const auto& triple : triples) {
+      if (internalRepr.value_or("False") == "True") {
+        oss << tripleToStringInternal(triple) << std::endl;
+      } else {
+        oss << tripleToString(triple) << std::endl;
+      }
+    }
+
+    response = createOkResponse(oss.str(), request, MediaType::textPlain);
   } else if (auto cmd = checkParameter("cmd", "get-settings")) {
     logCommand(cmd, "get server settings");
     response = createJsonResponse(
