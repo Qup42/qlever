@@ -26,8 +26,10 @@
 #include "engine/QueryExecutionContext.h"
 #include "engine/QueryPlanner.h"
 #include "engine/SparqlProtocol.h"
+#include "engine/UpdateMetadata.h"
 #include "global/RuntimeParameters.h"
 #include "index/IndexImpl.h"
+#include "index/IndexRebuilder.h"
 #include "parser/SparqlParser.h"
 #include "util/AsioHelpers.h"
 #include "util/Exception.h"
@@ -452,7 +454,7 @@ CPP_template_def(typename RequestT, typename ResponseT)(
   //
   // Some parameters require that "access-token" is set correctly. If not, that
   // parameter is ignored.
-  std::optional<http::response<http::string_body>> response;
+  std::optional<http::response<streamable_body>> response;
 
   // Execute commands (URL parameter with key "cmd").
   auto logCommand = [](const std::optional<std::string_view>& cmd,
@@ -730,6 +732,22 @@ CPP_template_def(typename RequestT, typename ResponseT)(
       json[nlohmann::json(key)] = std::move(value);
     }
     response = createJsonResponse(json, request);
+  } else if (auto cmd = checkParameter("cmd", "rebuild-index")) {
+    requireValidAccessToken("rebuild-index");
+
+    if (rebuildInProgress_.exchange(true)) {
+      response = createHttpResponseFromString(
+          "Another rebuild is currently in progress!",
+          http::status::too_many_requests, request, MediaType::textPlain);
+    } else {
+      absl::Cleanup cleanup{[this]() { rebuildInProgress_.store(false); }};
+      logCommand(cmd, "rebuilding index");
+      auto fileName =
+          checkParameter("index-name", std::nullopt).value_or("new_index");
+      co_await rebuildIndex(fileName);
+      response =
+          createOkResponse("Done writing", request, MediaType::textPlain);
+    }
   } else if (auto cmd = checkParameter("cmd", "write-materialized-view")) {
     requireValidAccessToken("write-materialized-view");
     logCommand(cmd, "write materialized view");
@@ -1134,6 +1152,10 @@ CPP_template_def(typename RequestT, typename ResponseT)(
 
   auto response = ad_utility::httpUtils::createOkResponse(
       std::move(responseGenerator), request, mediaType);
+  if (plannedQuery.parsedQuery_.responseMiddleware_.has_value()) {
+    response = plannedQuery.parsedQuery_.responseMiddleware_.value().applyQuery(
+        std::move(response));
+  }
   try {
     co_await send(std::move(response));
   } catch (const boost::system::system_error& e) {
@@ -1425,6 +1447,15 @@ CPP_template_def(typename RequestT, typename ResponseT)(
   AD_CORRECTNESS_CHECK(ql::ranges::all_of(
       updates, [](const ParsedQuery& p) { return p.hasUpdateClause(); }));
 
+  auto responseMiddlewares =
+      ad_utility::RvalueView(
+          updates | ql::views::transform(&ParsedQuery::responseMiddleware_) |
+          ql::views::filter(ad_utility::hasValue) |
+          ql::views::transform(ad_utility::value)) |
+      ::ranges::to<std::vector>();
+
+  std::vector<UpdateMetadata> metadatas;
+
   // If multiple updates are part of a single request, those have to run
   // atomically. This is ensured, because the updates below are run on the
   // `updateThreadPool_`, which only has a single thread.
@@ -1432,11 +1463,11 @@ CPP_template_def(typename RequestT, typename ResponseT)(
   auto coroutine = computeInNewThread(
       updateThreadPool_,
       [this, &requestTimer, &cancellationHandle, &updates, &qec, &timeLimit,
-       &plannedUpdate, outerTracer]() {
+       &plannedUpdate, outerTracer, &metadatas]() {
         outerTracer->endTrace("waitingForUpdateThread");
         return index_.deltaTriplesManager().modify<json>(
             [this, &cancellationHandle, &plannedUpdate, &updates, &requestTimer,
-             &timeLimit, &qec](DeltaTriples& deltaTriples) {
+             &timeLimit, &qec, &metadatas](DeltaTriples& deltaTriples) {
               qec.setLocatedTriplesForEvaluation(
                   deltaTriples.getLocatedTriplesSharedStateReference());
               json results = json::array();
@@ -1471,6 +1502,7 @@ CPP_template_def(typename RequestT, typename ResponseT)(
                     *deltaTriples.getLocatedTriplesSharedStateReference(),
                     *plannedUpdate, plannedUpdate->queryExecutionTree_,
                     updateMetadata, tracer));
+                metadatas.push_back(std::move(updateMetadata));
 
                 AD_LOG_INFO << "Done processing update, total time was "
                             << requestTimer.msecs().count() << " ms"
@@ -1488,15 +1520,19 @@ CPP_template_def(typename RequestT, typename ResponseT)(
       },
       cancellationHandle);
   auto operations = co_await std::move(coroutine);
-  auto response = nlohmann::ordered_json();
-  response["operations"] = operations;
+  auto responseJson = nlohmann::ordered_json();
+  responseJson["operations"] = operations;
   outerTracer->endTrace("update");
-  response["time"] = outerTracer->getJSONShort()["update"];
+  responseJson["time"] = outerTracer->getJSONShort()["update"];
 
   // SPARQL 1.1 Protocol 2.2.4 Successful Responses: "The responses body of a
   // successful update request is implementation defined."
-  co_await send(
-      ad_utility::httpUtils::createJsonResponse(std::move(response), request));
+  auto response = ad_utility::httpUtils::createJsonResponse(
+      std::move(responseJson), request);
+  for (auto& middleware : responseMiddlewares) {
+    response = middleware.applyUpdate(std::move(response), metadatas);
+  }
+  co_await send(std::move(response));
   co_return;
 }
 
@@ -1704,8 +1740,29 @@ void Server::writeMaterializedView(
       name, {qet, qec, std::move(plan.parsedQuery_)}, memoryLimit);
 }
 
+// _____________________________________________________________________________
+Awaitable<void> Server::rebuildIndex(const std::string& indexBaseName) {
+  // There is no mechanism to actually cancel the handle.
+  auto handle = std::make_shared<ad_utility::CancellationHandle<>>();
+  // We don't directly `co_await` because of lifetime issues (bugs) in the
+  // Conan setup.
+  auto coroutine = computeInNewThread(
+      queryThreadPool_,
+      [this, &handle, &indexBaseName] {
+        auto logFileName = indexBaseName + ".rebuild-index-log.txt";
+        auto [currentSnapshot, localVocabCopy, ownedBlocks] =
+            index_.deltaTriplesManager()
+                .getCurrentLocatedTriplesSharedStateWithVocab();
+        qlever::materializeToIndex(index_.getImpl(), indexBaseName,
+                                   currentSnapshot, localVocabCopy, ownedBlocks,
+                                   handle, logFileName);
+      },
+      handle);
+  co_await std::move(coroutine);
+}
+
 // For helper function `Server::onlyForTestingProcess`
-using NonStreamedResponse = http::response<http::string_body>;
+using StreamedResponse = http::response<ad_utility::httpUtils::streamable_body>;
 using SimpleRequest = http::request<http::string_body>;
 
 // _____________________________________________________________________________
@@ -1714,11 +1771,7 @@ CPP_template_def(typename RequestT, typename ResponseT)(
     Awaitable<ResponseT> Server::onlyForTestingProcess(RequestT& request) {
   ResponseT res;
   auto mockSend = [&](auto response) -> Awaitable<void> {
-    using T = std::decay_t<decltype(response)>;
-    // At the moment only non-streamed results are returned
-    if constexpr (std::is_same_v<T, NonStreamedResponse>) {
-      res = std::optional{response};
-    }
+    res = std::move(response);
     co_return;
   };
   co_await process(request, mockSend);
@@ -1726,5 +1779,5 @@ CPP_template_def(typename RequestT, typename ResponseT)(
 }
 
 // Explicit template instantiation for unit test helper function
-template Awaitable<std::optional<NonStreamedResponse>>
-Server::onlyForTestingProcess(SimpleRequest&);
+template Awaitable<StreamedResponse> Server::onlyForTestingProcess(
+    SimpleRequest&);

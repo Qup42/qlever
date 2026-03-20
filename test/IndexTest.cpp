@@ -14,7 +14,9 @@
 #include "./util/IdTableHelpers.h"
 #include "./util/IdTestHelpers.h"
 #include "./util/TripleComponentTestHelpers.h"
+#include "CompilationInfo.h"
 #include "index/Index.h"
+#include "index/IndexFormatVersion.h"
 #include "index/IndexImpl.h"
 #include "util/IndexTestHelpers.h"
 
@@ -145,7 +147,7 @@ TEST(IndexTest, createFromTurtleTest) {
       const auto& [index, qec] = getIndex();
       const auto& locatedTriplesSnapshot = qec.locatedTriplesState();
 
-      auto getId = makeGetId(getQec(kb)->getIndex());
+      auto getId = makeGetId(qec.getIndex());
       Id a = getId("<a>");
       Id b = getId("<b>");
       Id c = getId("<c>");
@@ -236,7 +238,7 @@ TEST(IndexTest, createFromTurtleTest) {
       const IndexImpl& index = qec.getIndex().getImpl();
       const auto& deltaTriples = qec.locatedTriplesState();
 
-      auto getId = makeGetId(getQec(kb)->getIndex());
+      auto getId = makeGetId(qec.getIndex());
       Id zero = getId("<0>");
       Id one = getId("<1>");
       Id two = getId("<2>");
@@ -293,7 +295,7 @@ TEST(IndexTest, createFromOnDiskIndexTest) {
   const IndexImpl& index = qec.getIndex().getImpl();
   const auto& deltaTriples = qec.locatedTriplesState();
 
-  auto getId = makeGetId(getQec(kb)->getIndex());
+  auto getId = makeGetId(qec.getIndex());
   Id b = getId("<b>");
   Id b2 = getId("<b2>");
   Id a = getId("<a>");
@@ -333,19 +335,18 @@ TEST(IndexTest, indexIdAndGitHash) {
 TEST(IndexTest, scanTest) {
   auto testWithAndWithoutPrefixCompression = [](bool useCompression) {
     using enum Permutation::Enum;
-    std::string kb =
-        "<a>  <b>  <c>  . \n"
-        "<a>  <b>  <c2> . \n"
-        "<a>  <b2> <c>  . \n"
-        "<a2> <b2> <c2> .   ";
-    auto& index = makeQecWithOrWithoutCompression(kb, useCompression)
-                      ->getIndex()
-                      .getImpl();
     {
+      std::string kb =
+          "<a>  <b>  <c>  . \n"
+          "<a>  <b>  <c2> . \n"
+          "<a>  <b2> <c>  . \n"
+          "<a2> <b2> <c2> .   ";
+      auto& qec =
+          *makeQecWithOrWithoutCompression(std::move(kb), useCompression);
+      auto& index = qec.getIndex().getImpl();
       IdTable wol(1, makeAllocator());
       IdTable wtl(2, makeAllocator());
 
-      const auto& qec = *getQec(kb);
       auto getId = makeGetId(qec.getIndex());
       Id a = getId("<a>");
       Id c = getId("<c>");
@@ -367,21 +368,21 @@ TEST(IndexTest, scanTest) {
       testOne(iri("<b2>"), iri("<c2>"), POS, {{a2}});
       testOne(iri("<notExisting>"), iri("<a>"), PSO, {});
     }
-    kb = "<a> <is-a> <1> . \n"
-         "<a> <is-a> <2> . \n"
-         "<a> <is-a> <0> . \n"
-         "<b> <is-a> <3> . \n"
-         "<b> <is-a> <0> . \n"
-         "<c> <is-a> <1> . \n"
-         "<c> <is-a> <2> . \n";
 
     {
-      TestIndexConfig config{kb};
-      config.usePrefixCompression = useCompression;
-      const auto& qec = *getQec(std::move(config));
+      std::string kb =
+          "<a> <is-a> <1> . \n"
+          "<a> <is-a> <2> . \n"
+          "<a> <is-a> <0> . \n"
+          "<b> <is-a> <3> . \n"
+          "<b> <is-a> <0> . \n"
+          "<c> <is-a> <1> . \n"
+          "<c> <is-a> <2> . \n";
+      const auto& qec =
+          *makeQecWithOrWithoutCompression(std::move(kb), useCompression);
       const IndexImpl& index = qec.getIndex().getImpl();
 
-      auto getId = makeGetId(ad_utility::testing::getQec(kb)->getIndex());
+      auto getId = makeGetId(qec.getIndex());
       Id a = getId("<a>");
       Id b = getId("<b>");
       Id c = getId("<c>");
@@ -587,6 +588,7 @@ TEST(IndexTest, trivialGettersAndSetters) {
 }
 
 TEST(IndexTest, updateInputFileSpecificationsAndLog) {
+  SKIP_IF_LOGLEVEL_IS_LOWER(WARN);
   using enum qlever::Filetype;
   std::vector<qlever::InputFileSpecification> singleFileSpec = {
       {"singleFile.ttl", Turtle, std::nullopt}};
@@ -738,7 +740,7 @@ TEST(IndexImpl, recomputeStatistics) {
     auto newStats = indexImpl.recomputeStatistics(
         index.deltaTriplesManager().getCurrentLocatedTriplesSharedState());
     EXPECT_NE(newStats, indexImpl.configurationJson_);
-    EXPECT_EQ(newStats["num-triples"], NNAI(5, 6));
+    EXPECT_EQ(newStats["num-triples"], NNAI(6, 7));
     EXPECT_EQ(newStats["num-predicates"], NNAI(2, 4));
     if (loadAllPermutations) {
       EXPECT_EQ(newStats["num-subjects"], NNAI(4, 0));
@@ -778,18 +780,23 @@ TEST(IndexImpl, createPermutation) {
 
   Permutation permutation{Permutation::PSO,
                           ad_utility::makeUnlimitedAllocator<Id>()};
-  size_t uniquePredicates = index.createPermutation(
+  auto [uniquePredicates, meta] = index.createPermutationWithoutMetadata(
       4,
       ad_utility::InputRangeTypeErased{std::array<IdTableStatic<0>, 2>{
           tables.at(0).clone(), tables.at(1).clone()}},
       permutation, false);
+  index.finalizePermutation(meta, permutation, false);
+
   EXPECT_EQ(uniquePredicates, 3);
   EXPECT_TRUE(std::filesystem::exists(onDiskBase + ".index.pso"));
   EXPECT_TRUE(std::filesystem::exists(onDiskBase + ".index.pso.meta"));
 
-  size_t uniqueInternalPredicates = index.createPermutation(
-      4, ad_utility::InputRangeTypeErased{std::move(tables)}, permutation,
-      true);
+  auto [uniqueInternalPredicates, internalMeta] =
+      index.createPermutationWithoutMetadata(
+          4, ad_utility::InputRangeTypeErased{std::move(tables)}, permutation,
+          true);
+  index.finalizePermutation(internalMeta, permutation, true);
+
   EXPECT_EQ(uniqueInternalPredicates, 3);
   EXPECT_TRUE(std::filesystem::exists(onDiskBase + ".internal.index.pso"));
   EXPECT_TRUE(std::filesystem::exists(onDiskBase + ".internal.index.pso.meta"));
@@ -861,4 +868,46 @@ TEST(IndexImpl, writePatternsToFile) {
             numDistinctSubjectPredicatePairs);
   EXPECT_TRUE(ql::ranges::equal(CompactVectorOfStrings{data}, result,
                                 ql::ranges::equal));
+}
+
+// _____________________________________________________________________________
+TEST(IndexImpl, loadConfigFromOldIndex) {
+  auto [directory, cleanup] = makeTemporaryDirectory("loadConfigFromOldIndex");
+  auto onDiskBase = directory + "/index";
+  IndexImpl other{ad_utility::makeUnlimitedAllocator<Id>()};
+  other.blocksizePermutationPerColumn() = 1337_B;
+  nlohmann::json stats;
+
+  Index::NumNormalAndInternal numTriples{42, 1337};
+  Index::NumNormalAndInternal numPredicates{9999, 1010};
+  Index::NumNormalAndInternal numSubjects{8888, 2020};
+  Index::NumNormalAndInternal numObjects{7777, 3030};
+
+  stats["num-triples"] = numTriples;
+  stats["num-predicates"] = numPredicates;
+  stats["num-subjects"] = numSubjects;
+  stats["num-objects"] = numObjects;
+  stats["i-just-invented-this"] = "🤠";
+
+  IndexImpl index{ad_utility::makeUnlimitedAllocator<Id>()};
+  index.loadConfigFromOldIndex(onDiskBase, other, stats);
+  EXPECT_EQ(index.getOnDiskBase(), onDiskBase);
+  EXPECT_EQ(index.getKbName(), other.getKbName());
+  EXPECT_EQ(index.numTriples(), numTriples);
+  EXPECT_EQ(index.numDistinctPredicates(), numPredicates);
+  EXPECT_EQ(index.numSubjects_, numSubjects);
+  EXPECT_EQ(index.numObjects_, numObjects);
+  EXPECT_EQ(index.blocksizePermutationPerColumn(),
+            other.blocksizePermutationPerColumn());
+  EXPECT_EQ(index.configurationJson_, stats);
+
+  // The version written to disk will also have these fields.
+  stats["git-hash"] = *qlever::version::gitShortHashWithoutLinking.wlock();
+  stats["index-format-version"] = qlever::indexFormatVersion;
+
+  std::string jsonFile = onDiskBase + CONFIGURATION_FILE;
+  std::ifstream in{jsonFile};
+  nlohmann::json jsonFromFile;
+  in >> jsonFromFile;
+  EXPECT_EQ(stats, jsonFromFile);
 }
