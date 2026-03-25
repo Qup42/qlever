@@ -13,6 +13,7 @@
 
 #include "CompilationInfo.h"
 #include "engine/Server.h"
+#include "engine/sparqlExpressions/CustomFunctionRegistry.h"
 #include "global/Constants.h"
 #include "global/RuntimeParameters.h"
 #include "util/MemorySize/MemorySize.h"
@@ -54,6 +55,7 @@ int main(int argc, char** argv) {
   bool onlyPsoAndPosPermutations;
   bool persistUpdates;
   std::vector<std::string> preloadMaterializedViews;
+  std::vector<std::string> pluginPaths;
 
   ad_utility::MemorySize memoryMaxSize;
 
@@ -197,6 +199,11 @@ int main(int argc, char** argv) {
       "prefix are rejected. To disable all federated queries, set this option "
       "to an invalid IRI prefix like `-`. Magic services (for example spatial "
       "search or materialized views) are never affected.");
+  add("load-plugin",
+      po::value<std::vector<std::string>>(&pluginPaths)->multitoken(),
+      "Paths to shared library plugins (.so) that provide custom SPARQL "
+      "functions. Multiple plugins can be specified. The server will refuse "
+      "to start if any plugin fails to load.");
   po::variables_map optionsMap;
 
   try {
@@ -220,6 +227,12 @@ int main(int argc, char** argv) {
               << ", compiled on " << qlever::version::DatetimeOfCompilation
               << " using git hash " << qlever::version::GitShortHash << EMPH_OFF
               << std::endl;
+
+  // Load custom function plugins before starting the server.
+  if (!pluginPaths.empty()) {
+    sparqlExpression::CustomFunctionRegistry::instance().loadPlugins(
+        pluginPaths);
+  }
 
   try {
     Server server(port, numSimultaneousQueries, memoryMaxSize,

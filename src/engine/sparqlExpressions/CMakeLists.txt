@@ -22,6 +22,7 @@ add_library(sparqlExpressions
         PrefilterExpressionIndex.cpp
         GeoExpression.cpp
         BlankNodeExpression.cpp
-        GroupConcatExpression.cpp)
+        GroupConcatExpression.cpp
+        CustomFunctionRegistry.cpp)
 
-qlever_target_link_libraries(sparqlExpressions util index Boost::url)
+qlever_target_link_libraries(sparqlExpressions util index Boost::url ${CMAKE_DL_LIBS})

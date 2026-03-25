@@ -22,6 +22,7 @@
 #include "engine/SpatialJoinConfig.h"
 #include "engine/sparqlExpressions/BlankNodeExpression.h"
 #include "engine/sparqlExpressions/CountStarExpression.h"
+#include "engine/sparqlExpressions/CustomFunctionRegistry.h"
 #include "engine/sparqlExpressions/ExistsExpression.h"
 #include "engine/sparqlExpressions/GroupConcatExpression.h"
 #include "engine/sparqlExpressions/LiteralExpression.h"
@@ -303,6 +304,21 @@ ExpressionPtr Visitor::processIriFunctionCall(
       return createUnary(&makeIsGeoPointExpression);
     } else if (ad_utility::contains(customGeoUnaryFuncs, functionName)) {
       return createUnary(customGeoUnaryFuncs.at(functionName));
+    }
+  }
+
+  // Check the custom function registry for dynamically loaded plugins.
+  {
+    auto& registry = sparqlExpression::CustomFunctionRegistry::instance();
+    std::string_view fullIri = asStringViewUnsafe(iri.getContent());
+    if (const auto* entry = registry.lookup(fullIri)) {
+      if (static_cast<int>(argList.size()) != entry->arity) {
+        reportError(
+            ctx, absl::StrCat("Custom function ", iri.toStringRepresentation(),
+                              " expects ", std::to_string(entry->arity),
+                              " argument(s)"));
+      }
+      return entry->factory(std::move(argList));
     }
   }
 

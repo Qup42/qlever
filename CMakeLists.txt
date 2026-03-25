@@ -510,9 +510,35 @@ if (NOT _EMSCRIPTEN_NO_INDEXBUILDER_AND_SERVER)
 
     add_executable(qlever-server src/ServerMain.cpp)
     qlever_target_link_libraries(qlever-server engine server ${CMAKE_THREAD_LIBS_INIT} Boost::program_options compilationInfo global)
+    # Export symbols so that dynamically loaded plugins can resolve them.
+    set_target_properties(qlever-server PROPERTIES ENABLE_EXPORTS ON)
     if (USE_PRECOMPILED_HEADERS)
         target_precompile_headers(qlever-server REUSE_FROM engine)
     endif()
+endif()
+
+option(BUILD_EXAMPLE_PLUGINS "Build example plugins for the custom function API" OFF)
+if(BUILD_EXAMPLE_PLUGINS)
+    add_library(example_plugin SHARED examples/ExamplePlugin.cpp)
+    # Plugins resolve symbols at runtime from the host process (qlever-server),
+    # so we only need the include paths for compilation, not the actual libraries.
+    # Get all transitive include directories from sparqlExpressions.
+    get_target_property(_SPARQL_EXPR_INCLUDES sparqlExpressions INCLUDE_DIRECTORIES)
+    get_target_property(_SPARQL_EXPR_IFACE_INCLUDES sparqlExpressions INTERFACE_INCLUDE_DIRECTORIES)
+    target_include_directories(example_plugin PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/parser
+        "$<TARGET_PROPERTY:sparqlExpressions,INCLUDE_DIRECTORIES>"
+        "$<TARGET_PROPERTY:sparqlExpressions,INTERFACE_INCLUDE_DIRECTORIES>")
+    # Inherit compile definitions and features but do not link.
+    target_compile_definitions(example_plugin PRIVATE
+        "$<TARGET_PROPERTY:sparqlExpressions,INTERFACE_COMPILE_DEFINITIONS>")
+    set_target_properties(example_plugin PROPERTIES
+        PREFIX ""
+        CXX_STANDARD 23
+        POSITION_INDEPENDENT_CODE ON)
+    # Allow undefined symbols — they resolve from the host process at load time.
+    target_link_options(example_plugin PRIVATE "LINKER:--allow-shlib-undefined")
 endif()
 
 add_executable(LibQLeverExample src/libqlever/LibQLeverExample.cpp)
