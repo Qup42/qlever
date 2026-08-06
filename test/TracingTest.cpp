@@ -79,6 +79,23 @@ TEST(Tracing, initializeInstallsNoProviderForExporterNone) {
 }
 
 // _____________________________________________________________________________
+TEST(Tracing, initializeInstallsARecordingProvider) {
+  setenv("OTEL_TRACES_EXPORTER", "console", /*overwrite=*/1);
+  absl::Cleanup cleanup{[]() { unsetenv("OTEL_TRACES_EXPORTER"); }};
+  auto providerBefore = opentelemetry::trace::Provider::GetTracerProvider();
+  auto handle = initialize(true);
+  EXPECT_NE(opentelemetry::trace::Provider::GetTracerProvider(),
+            providerBefore);
+  // A span created through the normal entry points has to be recorded, which is
+  // what makes the instrumentation in `Server` effective.
+  SpanGuard guard{"recorded", noParent()};
+  EXPECT_TRUE(guard.span().IsRecording());
+  EXPECT_TRUE(guard.context().IsValid());
+  EXPECT_TRUE(guard.context().IsSampled());
+  guard.setOk();
+}
+
+// _____________________________________________________________________________
 TEST(Tracing, spanGuardEndsSpanAndRecordsSuccess) {
   ScopedInMemoryTracer scopedTracer;
   {

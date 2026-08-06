@@ -123,6 +123,14 @@ class [[nodiscard(
 
   opentelemetry::trace::Span& span() const { return *span_; }
 
+  // The owned span as a shared pointer, which is what `Tracer::WithActiveSpan`
+  // needs. Only required where the thread-local OTEL context has to be attached
+  // for a synchronous stretch of code; prefer passing `context()` to a child.
+  opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> sharedSpan()
+      const {
+    return span_;
+  }
+
   // The context of this span, to be passed as the parent of child spans.
   // Explicit parenting is required in coroutines, because the thread-local
   // context is not reliable across a `co_await`.

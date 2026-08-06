@@ -37,6 +37,7 @@
 #include "util/json.h"
 #include "util/metrics/Metrics.h"
 #include "util/metrics/ServerMetrics.h"
+#include "util/metrics/Tracing.h"
 
 template <typename Operation>
 CPP_concept QueryOrUpdate =
@@ -185,7 +186,8 @@ class Server {
           ad_utility::url_parser::sparqlOperation::Operation operation,
           VisitorT visitor, const ad_utility::Timer& requestTimer,
           const RequestT& request, ResponseT& send,
-          const std::optional<PlannedQuery>& plannedQuery);
+          const std::optional<PlannedQuery>& plannedQuery,
+          ad_utility::tracing::SpanGuard& rootSpan);
 
   // Out of a list of allowed media types, choose the one that best fits the
   // given query type. Currently it just chooses the first from the list. If the
@@ -203,7 +205,8 @@ class Server {
           ParsedQuery&& query, const ad_utility::Timer& requestTimer,
           ad_utility::SharedCancellationHandle cancellationHandle,
           QueryExecutionContext& qec, const RequestT& request, ResponseT&& send,
-          TimeLimit timeLimit, std::optional<PlannedQuery>& plannedQuery);
+          TimeLimit timeLimit, std::optional<PlannedQuery>& plannedQuery,
+          const opentelemetry::trace::SpanContext& parentSpan);
   // For an executed update create a JSON with some stats on the update (timing,
   // number of changed triples, etc.).
   static nlohmann::ordered_json createResponseMetadataForUpdate(
