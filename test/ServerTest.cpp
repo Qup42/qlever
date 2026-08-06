@@ -10,6 +10,7 @@
 
 #include "./util/FileTestHelpers.h"
 #include "./util/MetricsTestHelpers.h"
+#include "./util/TracingTestHelpers.h"
 #include "ServerTestHelpers.h"
 #include "backports/filesystem.h"
 #include "engine/HttpError.h"
@@ -513,6 +514,126 @@ MATCHER_P(StatusIs, status,
 }
 
 using namespace serverTestHelpers;
+
+// _____________________________________________________________________________
+// `computeInNewThread` runs its function on a pool thread, whose OpenTelemetry
+// context is thread-local and therefore empty. Without the context being
+// propagated, a span created inside the function silently becomes the root of a
+// new trace, which produces a plausible-looking orphan trace rather than an
+// obvious failure — hence this test.
+TEST(ServerTest, computeInNewThreadPropagatesTracingContext) {
+  tracingTestHelpers::ScopedInMemoryTracer scopedTracer;
+  auto tracer = scopedTracer.tracer();
+
+  auto qec = getQec(TestIndexConfig{"<a> <b> <c> ."});
+  ServerForTesting serverForTesting{
+      1, "accessToken",
+      getDefaultConfigWithName(qec->getIndex().getOnDiskBase())};
+  Server& server = serverForTesting.server();
+  auto handle = std::make_shared<ad_utility::CancellationHandle<>>();
+
+  // Run `function` via `Server::computeInNewThread` and wait for it. The
+  // `io_context` is local to the call, mirroring `ServerForTesting::process`.
+  auto runInNewThread = [&server, &handle](std::function<void()> function) {
+    boost::asio::io_context io;
+    auto future = boost::asio::co_spawn(
+        io,
+        [](Server* server, std::function<void()> function,
+           ad_utility::SharedCancellationHandle handle)
+            -> boost::asio::awaitable<void> {
+          auto coroutine = server->computeInNewThread(
+              server->queryThreadPool_, std::move(function), std::move(handle));
+          co_await std::move(coroutine);
+        }(&server, std::move(function), handle),
+        boost::asio::use_future);
+    io.run();
+    future.get();
+  };
+
+  // The id of the thread that the pool ran the function on, so that the test
+  // can tell whether the hop actually happened.
+  std::thread::id threadIdInsideFunction;
+
+  {
+    auto parentSpan = tracer->StartSpan("parent");
+    // The context is attached only around the synchronous call below, which is
+    // where `computeInNewThread` snapshots it. Never held across a `co_await`.
+    auto scope = tracer->WithActiveSpan(parentSpan);
+    runInNewThread([&tracer, &threadIdInsideFunction]() {
+      threadIdInsideFunction = std::this_thread::get_id();
+      // No explicit parent: this must pick up the propagated context.
+      tracer->StartSpan("child")->End();
+    });
+    parentSpan->End();
+  }
+
+  EXPECT_NE(threadIdInsideFunction, std::this_thread::get_id())
+      << "the function did not actually run on a different thread, so this "
+         "test would pass even without context propagation";
+
+  auto spans = scopedTracer.spans();
+  ASSERT_EQ(spans.size(), 2);
+  // `child` ends before `parent`, so it is exported first.
+  const auto& child = *spans.at(0);
+  const auto& parent = *spans.at(1);
+  ASSERT_EQ(child.GetName(), "child");
+  ASSERT_EQ(parent.GetName(), "parent");
+  EXPECT_EQ(child.GetParentSpanId(), parent.GetSpanId());
+  EXPECT_EQ(child.GetTraceId(), parent.GetTraceId());
+}
+
+// _____________________________________________________________________________
+// The context must be detached again even when the function throws, because the
+// pool thread goes on to run unrelated tasks; a leaked token would parent those
+// tasks' spans to a long-finished request.
+TEST(ServerTest, computeInNewThreadDetachesTracingContextOnThrow) {
+  tracingTestHelpers::ScopedInMemoryTracer scopedTracer;
+  auto tracer = scopedTracer.tracer();
+
+  auto qec = getQec(TestIndexConfig{"<a> <b> <c> ."});
+  ServerForTesting serverForTesting{
+      1, "accessToken",
+      getDefaultConfigWithName(qec->getIndex().getOnDiskBase())};
+  Server& server = serverForTesting.server();
+  auto handle = std::make_shared<ad_utility::CancellationHandle<>>();
+
+  auto runInNewThread = [&server, &handle](std::function<void()> function) {
+    boost::asio::io_context io;
+    auto future = boost::asio::co_spawn(
+        io,
+        [](Server* server, std::function<void()> function,
+           ad_utility::SharedCancellationHandle handle)
+            -> boost::asio::awaitable<void> {
+          auto coroutine = server->computeInNewThread(
+              server->queryThreadPool_, std::move(function), std::move(handle));
+          co_await std::move(coroutine);
+        }(&server, std::move(function), handle),
+        boost::asio::use_future);
+    io.run();
+    future.get();
+  };
+
+  {
+    auto parentSpan = tracer->StartSpan("parent");
+    auto scope = tracer->WithActiveSpan(parentSpan);
+    EXPECT_THROW(runInNewThread([]() { throw std::runtime_error{"failed"}; }),
+                 std::runtime_error);
+    parentSpan->End();
+  }
+  // Drain the `parent` span, so that only what the next task produces is left.
+  EXPECT_EQ(scopedTracer.spans().size(), 1);
+
+  // A subsequent, unrelated task on the same (single-threaded) pool must see an
+  // empty context, i.e. its span must be a trace root.
+  runInNewThread([&tracer]() { tracer->StartSpan("unrelated")->End(); });
+
+  auto spans = scopedTracer.spans();
+  ASSERT_EQ(spans.size(), 1);
+  const auto& unrelated = *spans.at(0);
+  ASSERT_EQ(unrelated.GetName(), "unrelated");
+  EXPECT_FALSE(unrelated.GetParentSpanId().IsValid())
+      << "the context from the previous task leaked onto the pool thread";
+}
 
 // A minimal MetricsReader that returns a fixed Prometheus-format string.
 // Used for testing the `/metrics` endpoint routing without a real OTEL

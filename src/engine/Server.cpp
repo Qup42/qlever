@@ -12,6 +12,7 @@
 #include <absl/functional/bind_front.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
+#include <opentelemetry/context/runtime_context.h>
 
 #include <string>
 #include <variant>
@@ -1553,8 +1554,20 @@ CPP_template_def(typename Function,
   auto cancelTimerFuture = cancelTimerPromise.get_future();
 
   auto inner = [function = std::move(function),
+                // The OpenTelemetry context is thread-local, and the thread
+                // from the pool that runs `function` below has an empty one.
+                // Snapshot the calling thread's context here (this function is
+                // not a coroutine, so this runs synchronously on the caller)
+                // and re-attach it inside, so that spans created by `function`
+                // are parented to the request's span instead of silently
+                // starting a new trace.
+                context = opentelemetry::context::RuntimeContext::GetCurrent(),
                 cancelTimerFuture =
                     std::move(cancelTimerFuture)]() mutable -> T {
+    // Destroying the token detaches the context again, which must happen
+    // because the pool thread goes on to run unrelated tasks. `~Token` calls
+    // `Detach` itself, so this is also correct when `function` throws.
+    auto contextToken = opentelemetry::context::RuntimeContext::Attach(context);
     // Ensure future is ready by the time this is called.
     AD_CORRECTNESS_CHECK(cancelTimerFuture.wait_for(std::chrono::milliseconds{
                              0}) == std::future_status::ready);
@@ -1807,3 +1820,12 @@ CPP_template_def(typename RequestT, typename ResponseT)(
 // Explicit template instantiation for unit test helper function
 template Awaitable<StreamedResponse> Server::onlyForTestingProcess(
     SimpleRequest&);
+
+// Explicit template instantiation so that `ServerTest` can call
+// `computeInNewThread` with a function of its own, to check that the
+// OpenTelemetry context is propagated onto (and detached from) the pool thread.
+// `computeInNewThread` is a template defined in this translation unit, so
+// without this the test would not link.
+template Awaitable<void> Server::computeInNewThread(net::static_thread_pool&,
+                                                    std::function<void()>,
+                                                    SharedCancellationHandle);

@@ -65,6 +65,8 @@ class Server {
   FRIEND_TEST(ServerTest, createMessageSender);
   FRIEND_TEST(ServerTest, adjustParsedQueryLimitOffset);
   FRIEND_TEST(ServerTest, configurePinnedResultWithName);
+  FRIEND_TEST(ServerTest, computeInNewThreadPropagatesTracingContext);
+  FRIEND_TEST(ServerTest, computeInNewThreadDetachesTracingContextOnThrow);
   FRIEND_TEST(IndexRebuilder, serverIntegration);
   FRIEND_TEST(IndexRebuilder, serverIntegrationDroppedStateWarnings);
   FRIEND_TEST(IndexRebuilder, serverIntegrationAutomaticRebuild);
