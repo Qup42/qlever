@@ -581,6 +581,8 @@ addLinkAndDiscoverTest(QueryEventLogTest qlever_util)
 
 addLinkAndDiscoverTest(MetricsTest metrics)
 
+addLinkAndDiscoverTest(TracingTest metrics opentelemetry-cpp::in_memory_span_exporter)
+
 addLinkAndDiscoverTest(InstrumentedExecutorTest metrics)
 
 addLinkAndDiscoverTest(ResourceMonitorTest qlever_util)

@@ -24,6 +24,7 @@
 #include "util/ReadableNumberFacet.h"
 #include "util/ResourceMonitor.h"
 #include "util/metrics/Metrics.h"
+#include "util/metrics/Tracing.h"
 
 using std::size_t;
 using std::string;
@@ -54,6 +55,7 @@ int main(int argc, char** argv) {
   bool noAccessCheck = false;
   unsigned short port;
   bool metricsEnabled = false;
+  bool tracingEnabled = false;
   NonNegative numSimultaneousQueries = 1;
   bool noMetricsLog = false;
   bool noResourceUsageLog = false;
@@ -244,6 +246,14 @@ int main(int argc, char** argv) {
       "Enable metrics collection and expose a Prometheus /metrics endpoint on "
       "the main server port. Accessing the endpoint requires a valid access "
       "token.");
+  add("enable-tracing", po::bool_switch(&tracingEnabled)->default_value(false),
+      "Enable OpenTelemetry tracing of SPARQL operations. Each request then "
+      "produces a trace with one span per phase of its processing. Where the "
+      "spans are sent is configured via the standard OTEL environment "
+      "variables: OTEL_TRACES_EXPORTER selects the exporter (\"otlp\" by "
+      "default, or \"console\" to print the spans, or \"none\"), and "
+      "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT the endpoint that OTLP/HTTP sends "
+      "them to (http://localhost:4318/v1/traces by default).");
   std::vector<std::string> runtimeParameterAssignments;
   add("set-runtime-parameter",
       po::value<std::vector<std::string>>(&runtimeParameterAssignments)
@@ -330,6 +340,10 @@ int main(int argc, char** argv) {
                             ad_utility::ResourceMonitor::Mode::Append,
                             std::chrono::seconds{resourceUsageIntervalS});
     }
+    // Declared before the `Server`, so that it is destroyed after it: the
+    // handle uninstalls the tracer provider and flushes the buffered spans, and
+    // no span may be created after that has happened.
+    auto tracingHandle = ad_utility::tracing::initialize(tracingEnabled);
     auto metricsReader = ad_utility::metrics::initialize(metricsEnabled);
     Server server(port, numSimultaneousQueries, std::move(accessToken), config,
                   noAccessCheck, std::move(metricsReader));
