@@ -168,9 +168,14 @@ class Server {
   /// \param req The HTTP request.
   /// \param send The action that sends a http:response. (see the
   ///             `HttpServer.h` for documentation).
+  /// \param rootSpan The span covering the whole request. Owned by the caller,
+  ///             because the caller both creates the response for exceptions
+  ///             that escape this function and records the status code of
+  ///             every response.
   CPP_template(typename RequestT, typename ResponseT)(
       requires ad_utility::httpUtils::HttpRequest<RequestT>)
-      Awaitable<void> process(RequestT& request, ResponseT&& send);
+      Awaitable<void> process(RequestT& request, ResponseT&& send,
+                              ad_utility::tracing::SpanGuard& rootSpan);
 
   // Helper function for unit tests, calls `process` with the given request and
   // returns the response that would have been sent.

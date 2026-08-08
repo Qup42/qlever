@@ -14,6 +14,7 @@
 #include <absl/strings/str_join.h>
 #include <opentelemetry/context/runtime_context.h>
 #include <opentelemetry/semconv/client_attributes.h>
+#include <opentelemetry/semconv/db_attributes.h>
 #include <opentelemetry/semconv/http_attributes.h>
 #include <opentelemetry/semconv/url_attributes.h>
 #include <opentelemetry/semconv/user_agent_attributes.h>
@@ -67,7 +68,18 @@ CPP_template(typename RequestT)(
                                              const RequestT& request) {
   span.SetAttribute(semconv::http::kHttpRequestMethod,
                     std::string_view{request.method_string()});
-  span.SetAttribute(semconv::url::kUrlPath, std::string_view{request.target()});
+  // `target()` is the full request-target and thus still contains the query
+  // string, which the conventions want in a separate attribute. Note that for a
+  // GET request `url.query` therefore holds the SPARQL operation; that is the
+  // same information QLever writes to its log, but it does mean the attribute
+  // must be treated as potentially sensitive.
+  std::string_view target{request.target()};
+  size_t queryStart = target.find('?');
+  span.SetAttribute(semconv::url::kUrlPath, target.substr(0, queryStart));
+  if (queryStart != std::string_view::npos) {
+    // Without the leading `?`, as the conventions require.
+    span.SetAttribute(semconv::url::kUrlQuery, target.substr(queryStart + 1));
+  }
   // Both headers are absent for most requests, in which case beast returns an
   // empty string and we skip the attribute rather than record an empty one.
   auto setIfPresent = [&span, &request](const char* attribute,
@@ -84,6 +96,47 @@ CPP_template(typename RequestT)(
   std::string_view clientIp = request.base()["X-Real-IP"];
   if (!clientIp.empty()) {
     span.SetAttribute(semconv::client::kClientAddress, clientIp);
+  }
+}
+
+// The form of a SPARQL query, for the `db.operation.name` attribute below.
+// `DESCRIBE` does not appear because the parser rewrites it into a `CONSTRUCT`.
+std::string_view queryOperationName(const ParsedQuery& query) {
+  if (query.hasSelectClause()) {
+    return "SELECT";
+  }
+  if (query.hasAskClause()) {
+    return "ASK";
+  }
+  AD_CORRECTNESS_CHECK(query.hasConstructClause());
+  return "CONSTRUCT";
+}
+
+// Record the attributes describing the SPARQL operation on the root span of its
+// trace. These are the conventional database attributes, which are specified
+// for database *client* spans; there is no server-side counterpart yet, but
+// reusing the names is what makes a backend display and filter the operation
+// without knowing anything about QLever. For the same reason we do not emit any
+// of the `db.client.*` metrics.
+//
+// `operationName` has to be low-cardinality, so it is the form of the operation
+// (`SELECT`, `UPDATE`, ...) and never the operation itself.
+void setOperationAttributes(opentelemetry::trace::Span& span,
+                            std::string_view operationName,
+                            std::string_view operationString,
+                            size_t batchSize) {
+  // No value is registered for SPARQL or for QLever, and the conventions
+  // explicitly allow a custom one.
+  span.SetAttribute(semconv::db::kDbSystemName, "qlever");
+  span.SetAttribute(semconv::db::kDbOperationName, operationName);
+  // Truncated like the operation strings in the log and in error messages: a
+  // span carrying a megabyte-sized attribute is dropped by most backends.
+  span.SetAttribute(semconv::db::kDbQueryText,
+                    ad_utility::truncateOperationString(operationString));
+  // Only set for actual batches, as the conventions require.
+  if (batchSize > 1) {
+    span.SetAttribute(semconv::db::kDbOperationBatchSize,
+                      static_cast<int64_t>(batchSize));
   }
 }
 }  // namespace
@@ -157,18 +210,34 @@ void Server::run() {
   // to `HttpServer` below.
   auto httpSessionHandler =
       [this](auto request, auto&& send) -> boost::asio::awaitable<void> {
+    // The root span of the trace for this request. It covers the whole request,
+    // including the OPTIONS shortcut and the error handling below, so that
+    // every response is described by exactly one trace. If the client sent a
+    // `traceparent` header, this continues its trace instead of starting a new
+    // one; otherwise it becomes a new trace root. Lives in the coroutine frame,
+    // so the span is also ended when the request is cancelled.
+    // The name is only the HTTP method for now, because the route is not known
+    // before parsing; `process` refines it.
+    ad_utility::tracing::SpanGuard rootSpan{
+        std::string_view{request.method_string()},
+        ad_utility::tracing::extractParentFromRequest(request)};
+    setRequestAttributes(rootSpan.span(), request);
     // Version of send with maximally permissive CORS header (which allows the
     // client that receives the response to do with it what it wants).
     // NOTE: For POST and GET requests, the "allow origin" header is sufficient,
     // while the "allow headers" header is needed only for OPTIONS request. The
     // "allow methods" header is purely informational. To avoid two similar
     // lambdas here, we send the same headers for GET, POST, and OPTIONS.
+    // Every response QLever sends passes through here, which is why this is
+    // also where the status code is recorded on the root span.
     auto sendWithAccessControlHeaders =
-        [&send](auto response) -> boost::asio::awaitable<void> {
+        [&send, &rootSpan](auto response) -> boost::asio::awaitable<void> {
       response.set(http::field::access_control_allow_origin, "*");
       response.set(http::field::access_control_allow_headers, "*");
       response.set(http::field::access_control_allow_methods,
                    "GET, POST, OPTIONS");
+      rootSpan.span().SetAttribute(semconv::http::kHttpResponseStatusCode,
+                                   static_cast<int64_t>(response.result_int()));
       co_return co_await send(std::move(response));
     };
     // Reply to OPTIONS requests immediately by allowing everything.
@@ -179,6 +248,9 @@ void Server::run() {
       AD_LOG_INFO << std::endl;
       AD_LOG_INFO << "Request received via " << request.method()
                   << ", allowing everything" << std::endl;
+      // Explicitly, because this path does not go through `processOperation`,
+      // which is where all other successful requests record their status.
+      rootSpan.setOk();
       co_return co_await sendWithAccessControlHeaders(
           createOkResponse("", request, MediaType::textPlain));
     }
@@ -189,7 +261,7 @@ void Server::run() {
     std::optional<std::string> exceptionErrorMsg;
     std::optional<boost::beast::http::status> httpResponseStatus;
     try {
-      co_await process(request, sendWithAccessControlHeaders);
+      co_await process(request, sendWithAccessControlHeaders, rootSpan);
     } catch (const HttpError& e) {
       httpResponseStatus = e.status();
       exceptionErrorMsg = e.what();
@@ -446,7 +518,8 @@ void Server::configurePinnedResultWithName(
 // _____________________________________________________________________________
 CPP_template_def(typename RequestT, typename ResponseT)(
     requires ad_utility::httpUtils::HttpRequest<RequestT>)
-    Awaitable<void> Server::process(RequestT& request, ResponseT&& send) {
+    Awaitable<void> Server::process(RequestT& request, ResponseT&& send,
+                                    ad_utility::tracing::SpanGuard& rootSpan) {
   using namespace ad_utility::httpUtils;
   // Acquire the current index and the materialized views manager exactly once
   // for the whole request, under a single read lock. This way a concurrent
@@ -468,19 +541,6 @@ CPP_template_def(typename RequestT, typename ResponseT)(
 
   // Start timing.
   ad_utility::Timer requestTimer{ad_utility::Timer::Started};
-
-  // The root span of the trace for this request. Created before the request is
-  // parsed, so that requests that are rejected early (unknown path, unsupported
-  // media type, missing access token) also produce a trace. If the client sent
-  // a `traceparent` header, this continues its trace instead of starting a new
-  // one; otherwise it becomes a new trace root. Lives in the coroutine frame,
-  // so the span is also ended when the request is cancelled.
-  // The name is only the HTTP method for now, because the route is not known
-  // before parsing; it is refined below.
-  ad_utility::tracing::SpanGuard rootSpan{
-      std::string_view{request.method_string()},
-      ad_utility::tracing::extractParentFromRequest(request)};
-  setRequestAttributes(rootSpan.span(), request);
 
   // Parse the path and the URL parameters from the given request. Works for GET
   // requests as well as the two kinds of POST requests allowed by the SPARQL
@@ -832,8 +892,8 @@ CPP_template_def(typename RequestT, typename ResponseT)(
       }
       if (ql::ranges::all_of(operations, &ParsedQuery::hasUpdateClause)) {
         metrics_->startedSparqlOperations_->Add(1, {OperationType::update});
-        rootSpan.span().SetAttribute("qlever.operation",
-                                     OperationType::update.second);
+        setOperationAttributes(rootSpan.span(), "UPDATE", operationString,
+                               operations.size());
         co_await processUpdate(std::move(makeQec), std::move(operations),
                                requestTimer, tracer, cancellationHandle,
                                std::move(request), send, timeLimit.value(),
@@ -844,8 +904,9 @@ CPP_template_def(typename RequestT, typename ResponseT)(
         AD_CORRECTNESS_CHECK(query.hasSelectClause() || query.hasAskClause() ||
                              query.hasConstructClause());
         metrics_->startedSparqlOperations_->Add(1, {OperationType::query});
-        rootSpan.span().SetAttribute("qlever.operation",
-                                     OperationType::query.second);
+        // A query is never a batch, hence the batch size of one.
+        setOperationAttributes(rootSpan.span(), queryOperationName(query),
+                               operationString, 1);
         // Queries run against a consistent snapshot taken at the start of the
         // request, so build the execution context from that snapshot here.
         auto qecPtr = makeQec(indexAndViews);
@@ -1493,13 +1554,12 @@ CPP_template_def(typename RequestT, typename ResponseT)(
                 // see which `plan` belongs to which part. The parts are told
                 // apart by an attribute rather than by the span name, because
                 // encoding the index into the name would make it
-                // high-cardinality and break aggregation.
+                // high-cardinality and break aggregation. How many parts there
+                // are is not repeated here; it is `db.operation.batch.size` on
+                // the parent span.
                 ad_utility::tracing::SpanGuard updateSpan{"update", parentSpan};
                 updateSpan.span().SetAttribute("qlever.update.index",
                                                static_cast<int64_t>(i));
-                updateSpan.span().SetAttribute(
-                    "qlever.update.count",
-                    static_cast<int64_t>(updates.size()));
                 // Everything below runs on the single update thread without
                 // suspending, so the nesting can be expressed with plain
                 // scopes.
@@ -1636,8 +1696,6 @@ CPP_template_def(typename VisitorT, typename RequestT, typename ResponseT)(
   std::optional<ExceptionMetadata> metadata;
   try {
     co_await std::visit(visitor, std::move(operation));
-    rootSpan.span().SetAttribute(semconv::http::kHttpResponseStatusCode,
-                                 static_cast<int64_t>(responseStatus));
     rootSpan.setOk();
     co_return;
   } catch (const HttpError& e) {
@@ -1671,9 +1729,6 @@ CPP_template_def(typename VisitorT, typename RequestT, typename ResponseT)(
     metrics_->sparqlErrors_->Add(1, {SparqlErrorType::internal});
     rootSpan.recordException(e, SparqlErrorType::internal.second);
   }
-  // Reached only on the error paths above, where the status is now final.
-  rootSpan.span().SetAttribute(semconv::http::kHttpResponseStatusCode,
-                               static_cast<int64_t>(responseStatus));
   // TODO<qup42> at this stage should probably have a wrapper that takes
   //  optional<errorMsg> and optional<metadata> and does this logic
   if (to_status_class(responseStatus) == http::status_class::informational ||
@@ -1984,11 +2039,19 @@ CPP_template_def(typename RequestT, typename ResponseT)(
     requires ad_utility::httpUtils::HttpRequest<RequestT>)
     Awaitable<ResponseT> Server::onlyForTestingProcess(RequestT& request) {
   ResponseT res;
+  // The same root span that `run` creates around a real request, so that tests
+  // observe the same trace structure and the same attributes.
+  ad_utility::tracing::SpanGuard rootSpan{
+      std::string_view{request.method_string()},
+      ad_utility::tracing::extractParentFromRequest(request)};
+  setRequestAttributes(rootSpan.span(), request);
   auto mockSend = [&](auto response) -> Awaitable<void> {
+    rootSpan.span().SetAttribute(semconv::http::kHttpResponseStatusCode,
+                                 static_cast<int64_t>(response.result_int()));
     res = std::move(response);
     co_return;
   };
-  co_await process(request, mockSend);
+  co_await process(request, mockSend, rootSpan);
   co_return res;
 }
 

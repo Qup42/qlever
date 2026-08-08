@@ -722,7 +722,12 @@ TEST(ServerTest, tracingOfQueryRequest) {
   EXPECT_EQ(attribute(*root, "http.request.method"), "POST");
   EXPECT_EQ(attribute(*root, "http.route"), "/sparql");
   EXPECT_EQ(attribute(*root, "url.path"), "/sparql");
-  EXPECT_EQ(attribute(*root, "qlever.operation"), "query");
+  // The operation is described with the conventional database attributes.
+  EXPECT_EQ(attribute(*root, "db.system.name"), "qlever");
+  EXPECT_EQ(attribute(*root, "db.operation.name"), "SELECT");
+  EXPECT_EQ(attribute(*root, "db.query.text"), "SELECT * WHERE { ?s ?p ?o }");
+  // A query is not a batch, so the batch size is not set.
+  EXPECT_EQ(intAttribute(*root, "db.operation.batch.size"), std::nullopt);
   EXPECT_EQ(attribute(*exportSpan, "qlever.result.media_type"),
             "application/sparql-results+json");
   EXPECT_THAT(intAttribute(*root, "http.response.status_code"),
@@ -814,7 +819,33 @@ TEST(ServerTest, tracingOfRequestRejectedBeforeParsing) {
   ASSERT_TRUE(root);
   EXPECT_EQ(root->GetStatus(), opentelemetry::trace::StatusCode::kOk)
       << "a 404 is not an error of the server";
-  EXPECT_EQ(attribute(*root, "qlever.operation"), "<missing>");
+  EXPECT_EQ(attribute(*root, "db.operation.name"), "<missing>");
+  EXPECT_THAT(intAttribute(*root, "http.response.status_code"),
+              testing::Optional(404));
+}
+
+// _____________________________________________________________________________
+TEST(ServerTest, tracingSplitsTargetIntoPathAndQuery) {
+  tracingTestHelpers::ScopedInMemoryTracer scopedTracer;
+  auto qec = getQec(TestIndexConfig{"<a> <b> <c> ."});
+  ServerForTesting server{
+      1, "accessToken",
+      getDefaultConfigWithName(qec->getIndex().getOnDiskBase())};
+
+  // For a GET request the request-target carries the operation in its query
+  // string, which the conventions keep separate from the path.
+  auto response =
+      server.process(makeGetRequest("/sparql?query=SELECT%20%2A%20WHERE%20%7B%"
+                                    "20%3Fs%20%3Fp%20%3Fo%20%7D"));
+  ASSERT_THAT(response, StatusIs(http::status::ok));
+  responseBodyToString(std::move(response.body()));
+
+  auto spans = scopedTracer.spans();
+  const auto* root = findSpan(spans, "GET /sparql");
+  ASSERT_TRUE(root);
+  EXPECT_EQ(attribute(*root, "url.path"), "/sparql");
+  EXPECT_EQ(attribute(*root, "url.query"),
+            "query=SELECT%20%2A%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D");
 }
 
 // _____________________________________________________________________________
@@ -839,7 +870,11 @@ TEST(ServerTest, tracingOfUpdateRequest) {
   const auto* parse = findSpan(spans, "parse");
   const auto* waiting = findSpan(spans, "waitingForUpdateThread");
   ASSERT_TRUE(root && parse && waiting);
-  EXPECT_EQ(attribute(*root, "qlever.operation"), "update");
+  EXPECT_EQ(attribute(*root, "db.operation.name"), "UPDATE");
+  // The two `;`-separated parts make this a batch, which is recorded once on
+  // the root and not on every part.
+  EXPECT_THAT(intAttribute(*root, "db.operation.batch.size"),
+              testing::Optional(2));
   EXPECT_EQ(root->GetStatus(), opentelemetry::trace::StatusCode::kOk);
   // `parse` and the queueing span are siblings directly under the root.
   EXPECT_EQ(parse->GetParentSpanId(), root->GetSpanId());
@@ -858,8 +893,6 @@ TEST(ServerTest, tracingOfUpdateRequest) {
   for (const auto* updateSpan : updateSpans) {
     EXPECT_EQ(updateSpan->GetParentSpanId(), root->GetSpanId());
     EXPECT_EQ(updateSpan->GetTraceId(), root->GetTraceId());
-    EXPECT_THAT(intAttribute(*updateSpan, "qlever.update.count"),
-                testing::Optional(2));
     indices.push_back(intAttribute(*updateSpan, "qlever.update.index").value());
   }
   EXPECT_THAT(indices, testing::UnorderedElementsAre(0, 1));
