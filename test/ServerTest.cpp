@@ -818,6 +818,88 @@ TEST(ServerTest, tracingOfRequestRejectedBeforeParsing) {
 }
 
 // _____________________________________________________________________________
+TEST(ServerTest, tracingOfUpdateRequest) {
+  tracingTestHelpers::ScopedInMemoryTracer scopedTracer;
+  auto qec = getQec(TestIndexConfig{"<a> <b> <c> ."});
+  ServerForTesting server{
+      1, "accessToken",
+      getDefaultConfigWithName(qec->getIndex().getOnDiskBase())};
+
+  // Two `;`-separated parts, so that the per-part spans can be told apart.
+  auto response = server.process(
+      makeRequest(http::verb::post, "/sparql",
+                  {{http::field::content_type, "application/sparql-update"},
+                   {http::field::authorization, "Bearer accessToken"}},
+                  "INSERT DATA { <x> <y> <z> }; INSERT DATA { <p> <q> <r> }"));
+  ASSERT_THAT(response, StatusIs(http::status::ok));
+  responseBodyToString(std::move(response.body()));
+
+  auto spans = scopedTracer.spans();
+  const auto* root = findSpan(spans, "POST /sparql");
+  const auto* parse = findSpan(spans, "parse");
+  const auto* waiting = findSpan(spans, "waitingForUpdateThread");
+  ASSERT_TRUE(root && parse && waiting);
+  EXPECT_EQ(attribute(*root, "qlever.operation"), "update");
+  EXPECT_EQ(root->GetStatus(), opentelemetry::trace::StatusCode::kOk);
+  // `parse` and the queueing span are siblings directly under the root.
+  EXPECT_EQ(parse->GetParentSpanId(), root->GetSpanId());
+  EXPECT_EQ(waiting->GetParentSpanId(), root->GetSpanId());
+
+  // One `update` span per part, also directly under the root, distinguished by
+  // an attribute rather than by name.
+  std::vector<const opentelemetry::sdk::trace::SpanData*> updateSpans;
+  for (const auto& span : spans) {
+    if (span->GetName() == "update") {
+      updateSpans.push_back(span.get());
+    }
+  }
+  ASSERT_EQ(updateSpans.size(), 2);
+  std::vector<int64_t> indices;
+  for (const auto* updateSpan : updateSpans) {
+    EXPECT_EQ(updateSpan->GetParentSpanId(), root->GetSpanId());
+    EXPECT_EQ(updateSpan->GetTraceId(), root->GetTraceId());
+    EXPECT_THAT(intAttribute(*updateSpan, "qlever.update.count"),
+                testing::Optional(2));
+    indices.push_back(intAttribute(*updateSpan, "qlever.update.index").value());
+  }
+  EXPECT_THAT(indices, testing::UnorderedElementsAre(0, 1));
+
+  // Each part has its own phases, and each phase belongs to exactly one part.
+  // `clearCache` sits under `execute`, which is what makes the nesting worth
+  // having: it attributes the cache invalidation to the update that caused it.
+  auto parentIds = [&spans](std::string_view name) {
+    std::vector<opentelemetry::trace::SpanId> result;
+    for (const auto& span : spans) {
+      if (span->GetName() == name) {
+        result.push_back(span->GetParentSpanId());
+      }
+    }
+    return result;
+  };
+  for (std::string_view phase : {"updateMetadata", "plan", "execute"}) {
+    auto parents = parentIds(phase);
+    ASSERT_EQ(parents.size(), 2) << "one " << phase << " span per part";
+    EXPECT_THAT(parents,
+                testing::UnorderedElementsAre(updateSpans.at(0)->GetSpanId(),
+                                              updateSpans.at(1)->GetSpanId()))
+        << "the two " << phase << " spans do not belong to the two parts";
+  }
+  auto executeIds = [&spans]() {
+    std::vector<opentelemetry::trace::SpanId> result;
+    for (const auto& span : spans) {
+      if (span->GetName() == "execute") {
+        result.push_back(span->GetSpanId());
+      }
+    }
+    return result;
+  }();
+  auto clearCacheParents = parentIds("clearCache");
+  ASSERT_EQ(clearCacheParents.size(), 2);
+  EXPECT_THAT(clearCacheParents, testing::UnorderedElementsAre(
+                                     executeIds.at(0), executeIds.at(1)));
+}
+
+// _____________________________________________________________________________
 TEST(ServerTest, noSpansWhenTracingIsDisabled) {
   // Without a tracer provider installed, all the instrumentation added to the
   // request handling has to be inert.

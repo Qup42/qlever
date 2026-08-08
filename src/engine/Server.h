@@ -223,7 +223,8 @@ class Server {
           const ad_utility::Timer& requestTimer, SharedTimeTracer tracer,
           ad_utility::SharedCancellationHandle cancellationHandle,
           const RequestT& request, ResponseT&& send, TimeLimit timeLimit,
-          std::optional<PlannedQuery>& plannedUpdate);
+          std::optional<PlannedQuery>& plannedUpdate,
+          const opentelemetry::trace::SpanContext& parentSpan);
 
   // Determine media type candidates to be used for the result. Media types are
   // determined (in this order) by the current action (e.g.,
@@ -299,6 +300,7 @@ class Server {
       const Index& index, const PlannedQuery& plannedUpdate,
       ad_utility::SharedCancellationHandle cancellationHandle,
       DeltaTriples& deltaTriples,
+      const opentelemetry::trace::SpanContext& parentSpan,
       ad_utility::timer::TimeTracer& tracer =
           ad_utility::timer::DEFAULT_TIME_TRACER);
 
