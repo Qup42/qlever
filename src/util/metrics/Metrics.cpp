@@ -79,10 +79,6 @@ std::shared_ptr<MetricsReader> initialize(bool enabled) {
   // Pull reader — metrics served via /metrics on the main server port.
   auto pullReader = std::make_shared<PullMetricReader>();
 
-  // The `Resource` is shared with all other OTEL providers, so that a backend
-  // can tell that the signals come from the same QLever instance. Passing it
-  // requires the overload that also takes the views, hence the explicitly
-  // created empty `ViewRegistry`; the views are added below as before.
   auto provider = metrics_sdk::MeterProviderFactory::Create(
       std::make_unique<metrics_sdk::ViewRegistry>(), sharedResource());
 

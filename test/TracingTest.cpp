@@ -14,6 +14,7 @@
 #include <opentelemetry/trace/provider.h>
 
 #include <cstdlib>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -88,7 +89,7 @@ TEST(Tracing, initializeInstallsARecordingProvider) {
             providerBefore);
   // A span created through the normal entry points has to be recorded, which is
   // what makes the instrumentation in `Server` effective.
-  SpanGuard guard{"recorded", noParent()};
+  SpanGuard guard{"recorded", std::nullopt};
   EXPECT_TRUE(guard.span().IsRecording());
   EXPECT_TRUE(guard.context().IsValid());
   EXPECT_TRUE(guard.context().IsSampled());
@@ -99,7 +100,7 @@ TEST(Tracing, initializeInstallsARecordingProvider) {
 TEST(Tracing, spanGuardEndsSpanAndRecordsSuccess) {
   ScopedInMemoryTracer scopedTracer;
   {
-    SpanGuard guard{"work", noParent()};
+    SpanGuard guard{"work", std::nullopt};
     guard.setOk();
     // Not ended yet, so nothing has been exported.
     EXPECT_THAT(scopedTracer.spans(), testing::IsEmpty());
@@ -116,7 +117,7 @@ TEST(Tracing, spanGuardMarksSpanWithoutStatusAsError) {
   {
     // Neither `setOk` nor `setError`, which is what happens when the enclosing
     // coroutine frame is destroyed because the request was cancelled.
-    SpanGuard guard{"cancelled", noParent()};
+    SpanGuard guard{"cancelled", std::nullopt};
   }
   auto spans = scopedTracer.spans();
   ASSERT_EQ(spans.size(), 1);
@@ -128,14 +129,14 @@ TEST(Tracing, spanGuardMarksSpanWithoutStatusAsError) {
 TEST(Tracing, spanGuardRecordsErrorsAndExceptions) {
   ScopedInMemoryTracer scopedTracer;
   {
-    SpanGuard guard{"failing", noParent()};
+    SpanGuard guard{"failing", std::nullopt};
     // Deliberately a non-null-terminated view, to catch a `data()` being passed
     // on as a C string somewhere.
     std::string buffer = "timeoutAndMore";
     guard.setError(std::string_view{buffer}.substr(0, 7), "took too long");
   }
   {
-    SpanGuard guard{"throwing", noParent()};
+    SpanGuard guard{"throwing", std::nullopt};
     guard.recordException(std::runtime_error{"something broke"}, "internal");
   }
   auto spans = scopedTracer.spans();
@@ -166,7 +167,7 @@ TEST(Tracing, spanGuardRecordsErrorsAndExceptions) {
 TEST(Tracing, spanGuardParentsChildrenExplicitly) {
   ScopedInMemoryTracer scopedTracer;
   {
-    SpanGuard parent{"parent", noParent()};
+    SpanGuard parent{"parent", std::nullopt};
     {
       SpanGuard child{"child", parent.context()};
       child.setOk();
@@ -184,16 +185,16 @@ TEST(Tracing, spanGuardParentsChildrenExplicitly) {
 }
 
 // _____________________________________________________________________________
-TEST(Tracing, noParentStartsANewTraceEvenWithAnActiveSpan) {
+TEST(Tracing, nulloptStartsANewTraceEvenWithAnActiveSpan) {
   ScopedInMemoryTracer scopedTracer;
   {
     // An unrelated span is active on this thread. A span created with
-    // `noParent()` must still be a root: merely passing an invalid parent would
-    // make the SDK silently fall back to this context.
+    // `std::nullopt` must still be a root: merely leaving the parent unset
+    // would make the SDK silently fall back to this context.
     auto unrelated = scopedTracer.tracer()->StartSpan("unrelated");
     auto scope = scopedTracer.tracer()->WithActiveSpan(unrelated);
     {
-      SpanGuard guard{"root", noParent()};
+      SpanGuard guard{"root", std::nullopt};
       guard.setOk();
     }
     unrelated->End();
@@ -221,15 +222,15 @@ TEST(Tracing, extractParentFromRequest) {
   {
     auto request = makeRequestWithTraceparent(TRACEPARENT_SAMPLED);
     auto parent = extractParentFromRequest(request);
-    ASSERT_TRUE(parent.IsValid());
-    EXPECT_EQ(toHex(parent.trace_id()), TRACE_ID);
-    EXPECT_EQ(toHex(parent.span_id()), SPAN_ID);
-    EXPECT_TRUE(parent.IsSampled());
+    ASSERT_TRUE(parent.has_value());
+    EXPECT_EQ(toHex(parent->trace_id()), TRACE_ID);
+    EXPECT_EQ(toHex(parent->span_id()), SPAN_ID);
+    EXPECT_TRUE(parent->IsSampled());
   }
   {
     // No header at all: not an error, just no parent.
     auto request = ad_utility::testing::makeGetRequest("/sparql");
-    EXPECT_FALSE(extractParentFromRequest(request).IsValid());
+    EXPECT_FALSE(extractParentFromRequest(request).has_value());
   }
   {
     // A malformed header must not throw, because that would fail a request for
@@ -244,11 +245,13 @@ TEST(Tracing, extractParentFromRequest) {
           "00-0af7651916cd43dd8448eb211c80319c-0000000000000000-01",
           "zz-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}) {
       auto request = makeRequestWithTraceparent(traceparent);
-      opentelemetry::trace::SpanContext parent =
+      // Deliberately engaged, so that the check below cannot pass just because
+      // the assignment never happened.
+      std::optional<opentelemetry::trace::SpanContext> parent =
           opentelemetry::trace::SpanContext::GetInvalid();
       EXPECT_NO_THROW(parent = extractParentFromRequest(request))
           << "traceparent: " << traceparent;
-      EXPECT_FALSE(parent.IsValid()) << "traceparent: " << traceparent;
+      EXPECT_FALSE(parent.has_value()) << "traceparent: " << traceparent;
     }
   }
   {
@@ -258,8 +261,8 @@ TEST(Tracing, extractParentFromRequest) {
     auto request = makeRequestWithTraceparent(
         "99-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01");
     auto parent = extractParentFromRequest(request);
-    ASSERT_TRUE(parent.IsValid());
-    EXPECT_EQ(toHex(parent.trace_id()), TRACE_ID);
+    ASSERT_TRUE(parent.has_value());
+    EXPECT_EQ(toHex(parent->trace_id()), TRACE_ID);
   }
   {
     // The sampled flag is cleared, so the caller does not want this trace
@@ -268,7 +271,7 @@ TEST(Tracing, extractParentFromRequest) {
     auto request = makeRequestWithTraceparent(
         "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-00");
     auto parent = extractParentFromRequest(request);
-    ASSERT_TRUE(parent.IsValid());
-    EXPECT_FALSE(parent.IsSampled());
+    ASSERT_TRUE(parent.has_value());
+    EXPECT_FALSE(parent->IsSampled());
   }
 }

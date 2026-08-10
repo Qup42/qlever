@@ -26,12 +26,6 @@ namespace semconv = opentelemetry::semconv;
 namespace ad_utility::metrics {
 namespace {
 
-// The `service.name` used when the environment does not specify one. Without
-// it the SDK substitutes the literal `unknown_service`, which is useless in a
-// backend's service list. We must not set it unconditionally though: the
-// attributes passed to `Resource::Create` are merged *after* the ones detected
-// from the environment and therefore win over an operator's
-// `OTEL_SERVICE_NAME`.
 constexpr std::string_view DEFAULT_SERVICE_NAME = "qlever";
 
 // Names of the environment variables from which the OTEL SDK itself detects
@@ -85,10 +79,6 @@ const resource_sdk::Resource& sharedResource() {
       attributes.SetAttribute(semconv::service::kServiceName,
                               DEFAULT_SERVICE_NAME);
     }
-    // Deliberately no `host.name` and no `process.pid`: the hostname is what a
-    // collector's `resourcedetection` processor fills in correctly (in a
-    // container `gethostname` returns a meaningless container id), and the pid
-    // is not stable across restarts.
     return resource_sdk::Resource::Create(attributes);
   }();
   return resource;

@@ -14,21 +14,14 @@
 
 namespace ad_utility::metrics {
 
-// The identity of this process, shared by all OTEL providers (currently the
-// meter provider, later also the tracer provider) so that a backend can tell
-// that metrics and spans come from the same QLever instance. The attributes
-// describe the process and therefore belong here instead of being repeated on
-// every metric and span.
+// The identity shared by all OTEL providers so that a backend
+// can tell that metrics and spans come from the same QLever instance.
 //
-// Initialized on first use. Call only after `qlever::version::copyVersionInfo`
-// (see `ServerMain.cpp`), because the build information is read from the
-// variables that function populates.
+// NOTE: Call only after `qlever::version::copyVersionInfo`.
 const opentelemetry::sdk::resource::Resource& sharedResource();
 
 // Whether the environment specifies a `service.name`, either directly via
-// `OTEL_SERVICE_NAME` or as an entry of `OTEL_RESOURCE_ATTRIBUTES`. Exposed for
-// testing; `sharedResource` uses it to decide whether to supply a default, see
-// the comment on `kDefaultServiceName` in the implementation.
+// `OTEL_SERVICE_NAME` or as an entry of `OTEL_RESOURCE_ATTRIBUTES`.
 bool hasServiceNameFromEnv();
 
 }  // namespace ad_utility::metrics

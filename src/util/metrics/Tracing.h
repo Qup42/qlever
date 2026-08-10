@@ -15,21 +15,18 @@
 #include <opentelemetry/trace/context.h>
 #include <opentelemetry/trace/span.h>
 #include <opentelemetry/trace/tracer.h>
-#include <opentelemetry/trace/tracer_provider.h>
 #include <opentelemetry/version.h>
 
 #include <exception>
 #include <memory>
+#include <optional>
 #include <string_view>
 
 #include "util/Exception.h"
 #include "util/http/beast.h"
 
 // Forward declaration, so that this header does not have to pull in the OTEL
-// trace SDK. See the `provider_` member of `TracingHandle`. This has to go
-// through OTEL's macros, because the library puts everything in an inline
-// versioned namespace (`opentelemetry::v2`); declaring `opentelemetry::sdk`
-// directly would create a second, ambiguous `sdk`.
+// trace SDK. OTEL uses custom macros for its namespaces.
 OPENTELEMETRY_BEGIN_NAMESPACE
 namespace sdk::trace {
 class TracerProvider;
@@ -38,18 +35,11 @@ OPENTELEMETRY_END_NAMESPACE
 
 namespace ad_utility::tracing {
 
-// Keeps the tracing setup alive. Tracing stops working once this is destroyed:
-// pending spans are flushed and the no-op provider is reinstalled, so that no
-// span can be created after the exporter is gone. Consequently this must
-// outlive everything that creates spans, which for `qlever-server` means it has
-// to be declared before the `Server`.
+// Sets up tracing. On destruction tracing is reset to the no-op provider.
 class [[nodiscard(
-    "Spans are only exported while this handle is alive. Store it in a "
-    "variable.")]] TracingHandle {
-  // Empty when tracing is disabled, in which case destruction does nothing.
-  // The SDK type rather than the API type, because only the former can be shut
-  // down. Incomplete here on purpose, to keep the SDK headers out of this one;
-  // all member functions are defined in the `.cpp`.
+    "Tracing is only active while this handle is alive.")]] TracingHandle {
+  // Empty when tracing is disabled. The SDK type rather than the API type,
+  // because only the former can be shut down.
   std::shared_ptr<opentelemetry::sdk::trace::TracerProvider> provider_;
 
  public:
@@ -63,7 +53,6 @@ class [[nodiscard(
   TracingHandle(const TracingHandle&) = delete;
   TracingHandle& operator=(const TracingHandle&) = delete;
 
-  // Flush and uninstall right now instead of on destruction. Idempotent.
   void shutdown();
 };
 
@@ -75,7 +64,6 @@ class [[nodiscard(
 //
 // Which exporter is used, and where it sends spans, is taken from the standard
 // OTEL environment variables:
-//   OTEL_TRACES_EXPORTER              `otlp` (default), `console` or `none`
 //   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, OTEL_EXPORTER_OTLP_ENDPOINT
 //   OTEL_BSP_*                        batching behaviour
 //   OTEL_SERVICE_NAME, OTEL_RESOURCE_ATTRIBUTES   see `Resource.h`
@@ -86,13 +74,6 @@ class [[nodiscard(
 // The single tracer of this process. Cheap to call: the provider looks up an
 // existing tracer by name.
 opentelemetry::nostd::shared_ptr<opentelemetry::trace::Tracer> tracer();
-
-// A `SpanContext` that is deliberately not a valid parent, to be passed to
-// `SpanGuard` for a span that starts a new trace. Note that this is *not* the
-// same as leaving the parent unset: an unset (or invalid) parent makes the SDK
-// fall back to whatever context happens to be attached to the current thread,
-// whereas `SpanGuard` turns this into an explicit request for a root span.
-const opentelemetry::trace::SpanContext& noParent();
 
 // Owns a span and ends it on destruction.
 //
@@ -112,10 +93,15 @@ class [[nodiscard(
   bool statusRecorded_ = false;
 
  public:
-  // Start a span named `name` as a child of `parent`. Pass `noParent()` for a
-  // span that starts a new trace.
+  // Start a span named `name` as a child of `parent`, or a span that starts a
+  // new trace when `parent` is `std::nullopt`. Note that the latter is *not*
+  // the same as leaving the parent unset in OTEL: an unset (or invalid) parent
+  // makes the SDK fall back to whatever context happens to be attached to the
+  // current thread, whereas `std::nullopt` here is an explicit request for a
+  // root span. Takes `parent` by value, because it is copied into the span
+  // either way.
   SpanGuard(std::string_view name,
-            const opentelemetry::trace::SpanContext& parent);
+            std::optional<opentelemetry::trace::SpanContext> parent);
   ~SpanGuard();
 
   SpanGuard(const SpanGuard&) = delete;
@@ -185,12 +171,12 @@ class RequestHeaderCarrier
 };
 
 // Extract the span context a client sent via the `traceparent` header of
-// `request`, using the propagator installed by `initialize`. Returns an invalid
-// context when there is no such header or it is malformed, which is what
+// `request`, using the propagator installed by `initialize`. Returns
+// `std::nullopt` when there is no such header or it is malformed, which is what
 // `SpanGuard` expects for a span that starts a new trace. In particular this
 // never throws, so that a bad header cannot fail the request.
 template <typename RequestT>
-opentelemetry::trace::SpanContext extractParentFromRequest(
+std::optional<opentelemetry::trace::SpanContext> extractParentFromRequest(
     const RequestT& request) {
   RequestHeaderCarrier<RequestT> carrier{request};
   // `Extract` takes its input context by non-const reference, so it needs a
@@ -199,7 +185,11 @@ opentelemetry::trace::SpanContext extractParentFromRequest(
   auto context = opentelemetry::context::propagation::GlobalTextMapPropagator::
                      GetGlobalPropagator()
                          ->Extract(carrier, emptyContext);
-  return opentelemetry::trace::GetSpan(context)->GetContext();
+  auto parent = opentelemetry::trace::GetSpan(context)->GetContext();
+  if (!parent.IsValid()) {
+    return std::nullopt;
+  }
+  return parent;
 }
 
 }  // namespace ad_utility::tracing
