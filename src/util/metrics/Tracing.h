@@ -145,9 +145,10 @@ class RequestHeaderCarrier
       // The interface is unfortunate, because it mixes injection and
       // extraction.
       AD_FAIL();
+    } else {
+      // Note: `set` is not `noexcept`.
+      request_.base().set(toBeast(key), toBeast(value));
     }
-    // Note: `set` is not `noexcept`.
-    request_.base().set(toBeast(key), toBeast(value));
   }
 };
 

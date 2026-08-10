@@ -19,6 +19,8 @@
 #include <opentelemetry/semconv/url_attributes.h>
 #include <opentelemetry/semconv/user_agent_attributes.h>
 
+#include <boost/url/parse.hpp>
+#include <boost/url/url_view.hpp>
 #include <string>
 #include <variant>
 #include <vector>
@@ -59,38 +61,33 @@ using ad_utility::MediaType;
 namespace {
 namespace semconv = opentelemetry::semconv;
 
-// Record the attributes of an incoming HTTP request on the root span of its
-// trace, using the conventional attribute names so that a backend can display
-// and filter them without knowing anything about QLever.
+// Record the attributes of an incoming HTTP request on the root span using the
+// conventional attribute names.
 CPP_template(typename RequestT)(
     requires ad_utility::httpUtils::HttpRequest<
         RequestT>) void setRequestAttributes(opentelemetry::trace::Span& span,
                                              const RequestT& request) {
   span.SetAttribute(semconv::http::kHttpRequestMethod,
                     std::string_view{request.method_string()});
-  // `target()` is the full request-target and thus still contains the query
-  // string, which the conventions want in a separate attribute. Note that for a
-  // GET request `url.query` therefore holds the SPARQL operation; that is the
-  // same information QLever writes to its log, but it does mean the attribute
-  // must be treated as potentially sensitive.
-  std::string_view target{request.target()};
-  size_t queryStart = target.find('?');
-  span.SetAttribute(semconv::url::kUrlPath, target.substr(0, queryStart));
-  if (queryStart != std::string_view::npos) {
-    // Without the leading `?`, as the conventions require.
-    span.SetAttribute(semconv::url::kUrlQuery, target.substr(queryStart + 1));
+  if (auto url = boost::urls::parse_origin_form(request.target())) {
+    // Percent-encoded forms
+    span.SetAttribute(semconv::url::kUrlPath,
+                      std::string_view{url->encoded_path()});
+    if (url->has_query()) {
+      // Without leading `?`
+      span.SetAttribute(semconv::url::kUrlQuery,
+                        std::string_view{url->encoded_query()});
+    }
   }
-  // Both headers are absent for most requests, in which case beast returns an
-  // empty string and we skip the attribute rather than record an empty one.
-  auto setIfPresent = [&span, &request](const char* attribute,
-                                        boost::beast::http::field field) {
+  auto setIfPresent = [&span, &request](std::string_view attribute,
+                                        http::field field) {
     std::string_view value = request.base()[field];
     if (!value.empty()) {
       span.SetAttribute(attribute, value);
     }
   };
   setIfPresent(semconv::user_agent::kUserAgentOriginal,
-               boost::beast::http::field::user_agent);
+               http::field::user_agent);
   // The client's address as seen by a reverse proxy in front of QLever, which
   // is the only place it is available; the socket peer is the proxy.
   std::string_view clientIp = request.base()["X-Real-IP"];
@@ -112,28 +109,19 @@ std::string_view queryOperationName(const ParsedQuery& query) {
   return "CONSTRUCT";
 }
 
-// Record the attributes describing the SPARQL operation on the root span of its
-// trace. These are the conventional database attributes, which are specified
-// for database *client* spans; there is no server-side counterpart yet, but
-// reusing the names is what makes a backend display and filter the operation
-// without knowing anything about QLever. For the same reason we do not emit any
-// of the `db.client.*` metrics.
-//
-// `operationName` has to be low-cardinality, so it is the form of the operation
-// (`SELECT`, `UPDATE`, ...) and never the operation itself.
+// Record the attributes describing the SPARQL operation.
+// `operationName` should be low-cardinality, so it is the form of the operation
+// (`SELECT`, `UPDATE`, ...).
 void setOperationAttributes(opentelemetry::trace::Span& span,
                             std::string_view operationName,
                             std::string_view operationString,
                             size_t batchSize) {
-  // No value is registered for SPARQL or for QLever, and the conventions
-  // explicitly allow a custom one.
+  // Note: these attributes are specified for clients but we just use them
+  // anyways.
   span.SetAttribute(semconv::db::kDbSystemName, "qlever");
   span.SetAttribute(semconv::db::kDbOperationName, operationName);
-  // Truncated like the operation strings in the log and in error messages: a
-  // span carrying a megabyte-sized attribute is dropped by most backends.
   span.SetAttribute(semconv::db::kDbQueryText,
                     ad_utility::truncateOperationString(operationString));
-  // Only set for actual batches, as the conventions require.
   if (batchSize > 1) {
     span.SetAttribute(semconv::db::kDbOperationBatchSize,
                       static_cast<int64_t>(batchSize));
@@ -211,14 +199,9 @@ void Server::run() {
   // to `HttpServer` below.
   auto httpSessionHandler =
       [this](auto request, auto&& send) -> boost::asio::awaitable<void> {
-    // The root span of the trace for this request. It covers the whole request,
-    // including the OPTIONS shortcut and the error handling below, so that
-    // every response is described by exactly one trace. If the client sent a
-    // `traceparent` header, this continues its trace instead of starting a new
-    // one; otherwise it becomes a new trace root. Lives in the coroutine frame,
-    // so the span is also ended when the request is cancelled.
-    // The name is only the HTTP method for now, because the route is not known
-    // before parsing; `process` refines it.
+    // The root span of the trace for this request. Clients can pass in a parent
+    // trace to continue via the W3C Trace Context standard. The name is only
+    // the HTTP method for now.
     ad_utility::tracing::SpanGuard rootSpan{
         std::string_view{request.method_string()},
         ad_utility::tracing::extractParentFromRequest(request)};
@@ -229,8 +212,6 @@ void Server::run() {
     // while the "allow headers" header is needed only for OPTIONS request. The
     // "allow methods" header is purely informational. To avoid two similar
     // lambdas here, we send the same headers for GET, POST, and OPTIONS.
-    // Every response QLever sends passes through here, which is why this is
-    // also where the status code is recorded on the root span.
     auto sendWithAccessControlHeaders =
         [&send, &rootSpan](auto response) -> boost::asio::awaitable<void> {
       response.set(http::field::access_control_allow_origin, "*");
@@ -249,8 +230,6 @@ void Server::run() {
       AD_LOG_INFO << std::endl;
       AD_LOG_INFO << "Request received via " << request.method()
                   << ", allowing everything" << std::endl;
-      // Explicitly, because this path does not go through `processOperation`,
-      // which is where all other successful requests record their status.
       rootSpan.setOk();
       co_return co_await sendWithAccessControlHeaders(
           createOkResponse("", request, MediaType::textPlain));
@@ -549,15 +528,6 @@ CPP_template_def(typename RequestT, typename ResponseT)(
   // standard, see method `getUrlPathAndParameters`.
   auto parsedHttpRequest = SparqlProtocol::parseHttpRequest(request);
   const auto& parameters = parsedHttpRequest.parameters_;
-
-  // QLever has no routing table, it serves SPARQL on every path that is not one
-  // of the few special ones, so the path is the closest thing to a route that
-  // exists here. Note that this makes the span name as high-cardinality as the
-  // paths that clients actually request.
-  rootSpan.span().UpdateName(absl::StrCat(
-      std::string_view{request.method_string()}, " ", parsedHttpRequest.path_));
-  rootSpan.span().SetAttribute(opentelemetry::semconv::http::kHttpRoute,
-                               parsedHttpRequest.path_);
 
   // We always want to call `Server::checkParameter` with the same first
   // parameter.
@@ -907,7 +877,6 @@ CPP_template_def(typename RequestT, typename ResponseT)(
         AD_CORRECTNESS_CHECK(query.hasSelectClause() || query.hasAskClause() ||
                              query.hasConstructClause());
         metrics_->startedSparqlOperations_->Add(1, {OperationType::query});
-        // A query is never a batch, hence the batch size of one.
         setOperationAttributes(rootSpan.span(), queryOperationName(query),
                                operationString, 1);
         // Queries run against a consistent snapshot taken at the start of the
@@ -931,8 +900,6 @@ CPP_template_def(typename RequestT, typename ResponseT)(
                      &rootSpan](Query query) -> Awaitable<void> {
     // We need to copy the query string because `visitOperation` below also
     // needs it.
-    // The span is scoped to the parsing only. Note that this function is not a
-    // coroutine, so there is no suspension point inside the span.
     auto parsedQuery = [&] {
       ad_utility::tracing::SpanGuard parseSpan{"parse", rootSpan.context()};
       auto result = SparqlParser::parseQuery(
@@ -1319,23 +1286,9 @@ CPP_template_def(typename RequestT, typename ResponseT)(
   // probably related to issues in GCC's coroutine implementation.
   // For the same reason (crashes in the conanbuild) we store the coroutine in
   // an explicit variable instead of directly `co_await`-ing it.
-  // The span has to be kept in the coroutine frame across the `co_await` below,
-  // whereas the OTEL context must not be (the coroutine can resume on a
-  // different thread). Attaching it around the synchronous call to
-  // `computeInNewThread` is enough: that is where the context is captured to be
-  // re-attached on the pool thread, so that spans created during planning are
-  // parented correctly.
   {
     ad_utility::tracing::SpanGuard planSpan{"plan", parentSpan};
     auto coroutine = [&] {
-      // Attached only around this synchronous call, never across the
-      // `co_await` below: `computeInNewThread` captures the current OTEL
-      // context here to re-attach it on the pool thread, which is what parents
-      // any span created during planning to this one.
-      // `WithActiveSpan` takes its argument by non-const reference, so the
-      // shared pointer needs a name.
-      auto span = planSpan.sharedSpan();
-      auto scope = ad_utility::tracing::tracer()->WithActiveSpan(span);
       return computeInNewThread(
           queryThreadPool_,
           [this, &query, &requestTimer, &timeLimit, &qec,
@@ -1366,10 +1319,8 @@ CPP_template_def(typename RequestT, typename ResponseT)(
   adjustParsedQueryLimitOffset(plannedQuery.value(), mediaType, params);
 
   // This actually processes the query and sends the result in the
-  // requested format. Note that the result is computed lazily *while* it is
-  // being serialized, so this span covers the execution as well; that is the
-  // point of it, because a query that is slow to export looks exactly like a
-  // query that is slow to execute in the duration metric alone.
+  // requested format. The result is computed lazily *while* it is
+  // being serialized, so this span covers the execution as well.
   {
     ad_utility::tracing::SpanGuard exportSpan{"export", parentSpan};
     exportSpan.span().SetAttribute("qlever.result.media_type",
@@ -1514,12 +1465,6 @@ CPP_template_def(typename RequestT, typename ResponseT)(
 
   std::vector<UpdateMetadata> metadatas;
 
-  // Time spent queueing for the single update thread is a distinct operational
-  // problem from the time the update itself takes, so it gets its own span
-  // rather than being folded into `plan`. It is ended below on the update
-  // thread, once that thread has actually picked the update up. `optional`
-  // because `SpanGuard` is not movable; it lives in this coroutine frame, which
-  // outlives the lambda.
   std::optional<ad_utility::tracing::SpanGuard> waitSpan;
   waitSpan.emplace("waitingForUpdateThread", parentSpan);
 
@@ -1551,21 +1496,11 @@ CPP_template_def(typename RequestT, typename ResponseT)(
               json results = json::array();
               for (auto&& [i, update] : ranges::views::enumerate(updates)) {
                 auto tracer = ad_utility::timer::TimeTracer("update");
-                // One span per `;`-separated part of the request, wrapping that
-                // part's phases. Without this level, a request with ten parts
-                // produces thirty flat sibling spans and it is impossible to
-                // see which `plan` belongs to which part. The parts are told
-                // apart by an attribute rather than by the span name, because
-                // encoding the index into the name would make it
-                // high-cardinality and break aggregation. How many parts there
-                // are is not repeated here; it is `db.operation.batch.size` on
-                // the parent span.
+                // A request can contain multiple chained updates. Group each
+                // update with a span.
                 ad_utility::tracing::SpanGuard updateSpan{"update", parentSpan};
                 updateSpan.span().SetAttribute("qlever.update.index",
                                                static_cast<int64_t>(i));
-                // Everything below runs on the single update thread without
-                // suspending, so the nesting can be expressed with plain
-                // scopes.
                 // The augmented metadata is invalidated by any update. It is
                 // only updated automatically at the end of modify. Updates with
                 // non-empty graph patterns need the augmented metadata. Update
@@ -1786,20 +1721,8 @@ CPP_template_def(typename Function,
   auto cancelTimerFuture = cancelTimerPromise.get_future();
 
   auto inner = [function = std::move(function),
-                // The OpenTelemetry context is thread-local, and the thread
-                // from the pool that runs `function` below has an empty one.
-                // Snapshot the calling thread's context here (this function is
-                // not a coroutine, so this runs synchronously on the caller)
-                // and re-attach it inside, so that spans created by `function`
-                // are parented to the request's span instead of silently
-                // starting a new trace.
-                context = opentelemetry::context::RuntimeContext::GetCurrent(),
                 cancelTimerFuture =
                     std::move(cancelTimerFuture)]() mutable -> T {
-    // Destroying the token detaches the context again, which must happen
-    // because the pool thread goes on to run unrelated tasks. `~Token` calls
-    // `Detach` itself, so this is also correct when `function` throws.
-    auto contextToken = opentelemetry::context::RuntimeContext::Attach(context);
     // Ensure future is ready by the time this is called.
     AD_CORRECTNESS_CHECK(cancelTimerFuture.wait_for(std::chrono::milliseconds{
                              0}) == std::future_status::ready);
@@ -2049,8 +1972,7 @@ CPP_template_def(typename RequestT, typename ResponseT)(
     requires ad_utility::httpUtils::HttpRequest<RequestT>)
     Awaitable<ResponseT> Server::onlyForTestingProcess(RequestT& request) {
   ResponseT res;
-  // The same root span that `run` creates around a real request, so that tests
-  // observe the same trace structure and the same attributes.
+  // The same root span that `run` creates around a real request.
   ad_utility::tracing::SpanGuard rootSpan{
       std::string_view{request.method_string()},
       ad_utility::tracing::extractParentFromRequest(request)};
@@ -2069,11 +1991,7 @@ CPP_template_def(typename RequestT, typename ResponseT)(
 template Awaitable<StreamedResponse> Server::onlyForTestingProcess(
     SimpleRequest&);
 
-// Explicit template instantiation so that `ServerTest` can call
-// `computeInNewThread` with a function of its own, to check that the
-// OpenTelemetry context is propagated onto (and detached from) the pool thread.
-// `computeInNewThread` is a template defined in this translation unit, so
-// without this the test would not link.
+// Explicit template instantiation for `ServerTest`
 template Awaitable<void> Server::computeInNewThread(net::static_thread_pool&,
                                                     std::function<void()>,
                                                     SharedCancellationHandle);
