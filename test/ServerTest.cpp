@@ -969,7 +969,6 @@ TEST(ServerTest, noSpansWhenTracingIsDisabled) {
   ServerForTesting server{
       1, "accessToken",
       getDefaultConfigWithName(qec->getIndex().getOnDiskBase())};
-  auto handle = ad_utility::tracing::initialize(false);
 
   auto response = server.process(
       makeRequest(http::verb::post, "/sparql",

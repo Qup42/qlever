@@ -391,7 +391,10 @@ int main(int argc, char** argv) {
     // Declared before the `Server`, so that it is destroyed after it: the
     // handle uninstalls the tracer provider and flushes the buffered spans, and
     // no span may be created after that has happened.
-    auto tracingHandle = ad_utility::tracing::initialize(tracingEnabled);
+    ad_utility::tracing::TracingHandle tracingHandle;
+    if (tracingEnabled) {
+      tracingHandle = ad_utility::tracing::initialize();
+    }
     auto metricsReader = ad_utility::metrics::initialize(metricsEnabled);
     Server server(port, numSimultaneousQueries, std::move(accessToken), config,
                   noAccessCheck, std::move(metricsReader));

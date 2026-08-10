@@ -86,10 +86,7 @@ void TracingHandle::shutdown() {
 }
 
 // _____________________________________________________________________________
-TracingHandle initialize(bool enabled) {
-  if (!enabled) {
-    return {};
-  }
+TracingHandle initialize() {
   // The endpoint is configured with the standard `OTEL_EXPORTER_OTLP_TRACES_*`
   // variables.
   auto exporter =

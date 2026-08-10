@@ -21,6 +21,7 @@
 #include <memory>
 #include <optional>
 #include <string_view>
+#include <type_traits>
 
 #include "util/Exception.h"
 #include "util/http/beast.h"
@@ -56,50 +57,31 @@ class [[nodiscard(
   void shutdown();
 };
 
-// Install the global OTEL `TracerProvider`, and the W3C propagator used to read
-// a `traceparent` header from incoming requests. When `enabled` is false this
-// does nothing at all: the provider remains the no-op provider that the API
-// installs by default, which makes every `StartSpan` below a cheap no-op. Call
-// sites therefore need no `if (tracingEnabled)` guards.
-//
-// Which exporter is used, and where it sends spans, is taken from the standard
-// OTEL environment variables:
-//   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, OTEL_EXPORTER_OTLP_ENDPOINT
-//   OTEL_BSP_*                        batching behaviour
-//   OTEL_SERVICE_NAME, OTEL_RESOURCE_ATTRIBUTES   see `Resource.h`
-//
-// Must be called once at startup, before anything creates a span.
-[[nodiscard]] TracingHandle initialize(bool enabled);
+// Sets up tracing. Configures tracing using the provided `OTEL_*` environment
+// variables and continuation of traces from incoming HTTP requests. When
+// `TracingHandle` is dropped, the default no-op behaviour of tracing is
+// restored.
+[[nodiscard]] TracingHandle initialize();
 
-// The single tracer of this process. Cheap to call: the provider looks up an
-// existing tracer by name.
+// Returns the single tracer instance for this process.
 opentelemetry::nostd::shared_ptr<opentelemetry::trace::Tracer> tracer();
 
-// Owns a span and ends it on destruction.
-//
-// Ending from the destructor matters for more than convenience: a span that is
-// only ended on the success path is never exported and its memory is held by
-// the processor. Because QLever's request handling is built from coroutines
-// that can be cancelled or time out, the only reliable place to end a span is
-// the destructor of the coroutine frame, which is what this achieves.
-//
-// If neither `setOk` nor an error was recorded by the time the guard is
-// destroyed, the span is marked as an error, on the assumption that the frame
-// was destroyed abnormally.
+// Owns a span and ends it on destruction. If none of `setOk`, `setError` or
+// `recordException` is called before the span ends, it is assumed that the
+// coroutine was cancelled. Only ended spans are exported by the SDK. By ending
+// them in the destructor we ensure that this is always the case, also for
+// exceptions.
 class [[nodiscard(
-    "The span is only ended when this guard is destroyed. Store it in a "
+    "The span is ended when this guard is destroyed. Store it in a "
     "variable.")]] SpanGuard {
   opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> span_;
   bool statusRecorded_ = false;
 
  public:
-  // Start a span named `name` as a child of `parent`, or a span that starts a
-  // new trace when `parent` is `std::nullopt`. Note that the latter is *not*
-  // the same as leaving the parent unset in OTEL: an unset (or invalid) parent
-  // makes the SDK fall back to whatever context happens to be attached to the
-  // current thread, whereas `std::nullopt` here is an explicit request for a
-  // root span. Takes `parent` by value, because it is copied into the span
-  // either way.
+  // Start a span as a child of `parent`. Set `parent` to `std::nullopt` to
+  // start a new root span. Note: we have to pass the parent explicitly because
+  // the default in the SDK relies on thread local storage which doesn't work
+  // with coroutines.
   SpanGuard(std::string_view name,
             std::optional<opentelemetry::trace::SpanContext> parent);
   ~SpanGuard();
@@ -109,26 +91,20 @@ class [[nodiscard(
 
   opentelemetry::trace::Span& span() const { return *span_; }
 
-  // The owned span as a shared pointer, which is what `Tracer::WithActiveSpan`
-  // needs. Only required where the thread-local OTEL context has to be attached
-  // for a synchronous stretch of code; prefer passing `context()` to a child.
+  // The owned span as a shared pointer.
   opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> sharedSpan()
       const {
     return span_;
   }
 
   // The context of this span, to be passed as the parent of child spans.
-  // Explicit parenting is required in coroutines, because the thread-local
-  // context is not reliable across a `co_await`.
-  // Returns by value, because `Span::GetContext` does.
   opentelemetry::trace::SpanContext context() const;
 
-  // Record that the work the span describes finished successfully.
+  // Record that the span finished successfully.
   void setOk();
 
-  // Record a failure. `errorType` should be one of the values also used for the
-  // `type` label of the error metrics (see `Metrics.h`), so that spans and
-  // metrics can be filtered the same way.
+  // Record a failure. For consistency `errorType` should be one of the values
+  // also used for the `type` label of the error metrics.
   void setError(std::string_view errorType, std::string_view message);
 
   // Like `setError`, and additionally records the exception's type and message
@@ -137,48 +113,51 @@ class [[nodiscard(
                        std::string_view errorType);
 };
 
-// Read-only `TextMapCarrier` over the headers of an incoming HTTP request, so
-// that the propagator can extract a `traceparent` a client may have sent. The
-// referenced request has to outlive the carrier.
-//
-// Only the extracting direction is implemented. Injecting into an outgoing
-// request (to propagate into federated `SERVICE` requests) needs a writable
-// carrier, and `HttpClient` cannot currently send arbitrary headers anyway.
+// Adapter between the propagator machinery of OTEL and our concrete Boost.Beast
+// HTTP types. `Get` reads a `traceparent` a client may have sent, `Set` writes
+// one into an outgoing request, so that a trace continues into the service we
+// call (for example a federated `SERVICE` request).
 template <typename RequestT>
 class RequestHeaderCarrier
     : public opentelemetry::context::propagation::TextMapCarrier {
-  const RequestT& request_;
+  RequestT& request_;
+
+  static boost::beast::string_view toBeast(
+      opentelemetry::nostd::string_view view) {
+    return {view.data(), view.size()};
+  }
 
  public:
-  explicit RequestHeaderCarrier(const RequestT& request) : request_{request} {}
+  explicit RequestHeaderCarrier(RequestT& request) : request_{request} {}
 
   opentelemetry::nostd::string_view Get(
       opentelemetry::nostd::string_view key) const noexcept override {
-    auto it =
-        request_.base().find(boost::beast::string_view{key.data(), key.size()});
+    auto it = request_.base().find(toBeast(key));
     if (it == request_.base().end()) {
       return {};
     }
     return {it->value().data(), it->value().size()};
   }
 
-  void Set(opentelemetry::nostd::string_view,
-           opentelemetry::nostd::string_view) noexcept override {
-    // Unreachable: this carrier is only ever used for extraction. Not throwing,
-    // because the interface is `noexcept`.
-    AD_FAIL();
+  void Set(opentelemetry::nostd::string_view key,
+           opentelemetry::nostd::string_view value) noexcept override {
+    if constexpr (std::is_const_v<RequestT>) {
+      // The interface is unfortunate, because it mixes injection and
+      // extraction.
+      AD_FAIL();
+    }
+    // Note: `set` is not `noexcept`.
+    request_.base().set(toBeast(key), toBeast(value));
   }
 };
 
-// Extract the span context a client sent via the `traceparent` header of
-// `request`, using the propagator installed by `initialize`. Returns
-// `std::nullopt` when there is no such header or it is malformed, which is what
-// `SpanGuard` expects for a span that starts a new trace. In particular this
-// never throws, so that a bad header cannot fail the request.
+// Extract the span context a client sent via the
+// `request`, using the propagator configured by `initialize`. Returns
+// `std::nullopt` when there is no valid header.
 template <typename RequestT>
 std::optional<opentelemetry::trace::SpanContext> extractParentFromRequest(
     const RequestT& request) {
-  RequestHeaderCarrier<RequestT> carrier{request};
+  RequestHeaderCarrier<const RequestT> carrier{request};
   // `Extract` takes its input context by non-const reference, so it needs a
   // named variable rather than a temporary.
   opentelemetry::context::Context emptyContext{};

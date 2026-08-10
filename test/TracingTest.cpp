@@ -53,10 +53,13 @@ auto makeRequestWithTraceparent(const std::string& traceparent) {
 }  // namespace
 
 // _____________________________________________________________________________
-TEST(Tracing, initializeDoesNothingWhenDisabled) {
+// When tracing is disabled, `initialize` is simply never called and the handle
+// stays default-constructed. Such a handle must neither install nor, on
+// destruction, uninstall anything.
+TEST(Tracing, defaultConstructedHandleDoesNothing) {
   auto providerBefore = opentelemetry::trace::Provider::GetTracerProvider();
   {
-    auto handle = initialize(false);
+    TracingHandle handle;
     // The provider is untouched, so spans are created by the API's no-op
     // implementation and are not recording.
     EXPECT_EQ(opentelemetry::trace::Provider::GetTracerProvider(),
@@ -74,7 +77,7 @@ TEST(Tracing, initializeInstallsNoProviderForExporterNone) {
   auto providerBefore = opentelemetry::trace::Provider::GetTracerProvider();
   setenv("OTEL_TRACES_EXPORTER", "none", /*overwrite=*/1);
   absl::Cleanup cleanup{[]() { unsetenv("OTEL_TRACES_EXPORTER"); }};
-  auto handle = initialize(true);
+  auto handle = initialize();
   EXPECT_EQ(opentelemetry::trace::Provider::GetTracerProvider(),
             providerBefore);
 }
@@ -84,7 +87,7 @@ TEST(Tracing, initializeInstallsARecordingProvider) {
   setenv("OTEL_TRACES_EXPORTER", "console", /*overwrite=*/1);
   absl::Cleanup cleanup{[]() { unsetenv("OTEL_TRACES_EXPORTER"); }};
   auto providerBefore = opentelemetry::trace::Provider::GetTracerProvider();
-  auto handle = initialize(true);
+  auto handle = initialize();
   EXPECT_NE(opentelemetry::trace::Provider::GetTracerProvider(),
             providerBefore);
   // A span created through the normal entry points has to be recorded, which is
