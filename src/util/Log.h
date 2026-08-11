@@ -7,6 +7,7 @@
 #ifndef QLEVER_SRC_UTIL_LOG_H
 #define QLEVER_SRC_UTIL_LOG_H
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 #include <absl/time/clock.h>
@@ -19,6 +20,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 #include "backports/keywords.h"
 #include "util/EnumWithStrings.h"
@@ -67,15 +69,17 @@ using LogLevel = ad_utility::LogLevel;
 using enum LogLevel::Enum;
 
 // Both the compile-time level (LOGLEVEL) and the runtime level must pass for a
-// message to be logged. The LogLock temporary is held for the entire <<
-// chain and released at the semicolon that ends the statement.
+// message to be logged. If they don't, the `LogStatement` is never constructed
+// and the arguments of the `<<` chain are never evaluated. The `LogStatement`
+// temporary lives until the semicolon that ends the statement, so its
+// destructor is the signal that the message is complete.
 #define AD_LOG(x)                                                     \
   if (x > LOGLEVEL || x > ::ad_utility::detail::runtimeLogLevel.load( \
                               std::memory_order_relaxed))             \
     ;                                                                 \
   else                                                                \
-    (::ad_utility::detail::LogLock{::ad_utility::detail::logMutex},   \
-     ::ad_utility::Log::getLog<x>())  // NOLINT
+    ::ad_utility::detail::LogStatement{x, __FILE__, __LINE__}         \
+        .stream()  // NOLINT
 
 // Macros for the different log levels.
 #define AD_LOG_FATAL AD_LOG(LogLevel::Enum::FATAL)
@@ -99,12 +103,6 @@ static constexpr LogLevel::Enum defaultLogLevel =
 // Defaults to the less verbose of INFO and the compile-time LOGLEVEL so that
 // the runtime level is never set to something the binary cannot log.
 inline std::atomic<LogLevel::Enum> runtimeLogLevel = defaultLogLevel;
-// Non-[[nodiscard]] wrapper so the comma-operator pattern doesn't trigger
-// -Wunused-value warnings (std::lock_guard itself is [[nodiscard]] in libc++).
-struct LogLock {
-  std::lock_guard<std::mutex> lock_;
-  explicit LogLock(std::mutex& m) : lock_{m} {}
-};
 }  // namespace detail
 
 // Set the runtime log level. Throws if `level` is more verbose than the
@@ -171,11 +169,120 @@ class Log {
 
   static void imbue(const std::locale& locale) { std::cout.imbue(locale); }
 
-  static std::string getTimeStamp() {
-    return absl::FormatTime("%Y-%m-%d %H:%M:%E3S", absl::Now(),
-                            absl::LocalTimeZone());
+  static std::string formatTimestamp(absl::Time time) {
+    return absl::FormatTime("%Y-%m-%d %H:%M:%E3S", time, absl::LocalTimeZone());
+  }
+
+  static std::string getTimeStamp() { return formatTimestamp(absl::Now()); }
+};
+
+// One complete log message, as handed to a `LogSink`. The string views point
+// into storage owned by the caller and are only valid for the duration of the
+// `emit` call.
+struct LogRecord {
+  LogLevel level_;
+  absl::Time timestamp_;
+  // The message without the `<timestamp> - <LEVEL>: ` prefix and without a
+  // trailing newline.
+  std::string_view message_;
+  std::string_view file_;
+  int line_;
+};
+
+// An additional destination for log messages, besides the textual log stream.
+class LogSink {
+ public:
+  virtual ~LogSink() = default;
+  virtual void emit(const LogRecord& record) = 0;
+};
+
+namespace detail {
+// The currently installed sink, or `nullptr` if there is none. Read once per
+// log message, so an `atomic` is enoug.
+inline std::atomic<LogSink*> logSink = nullptr;
+
+// Guards against a sink that logs itself. // TODO: this bbool and th ee
+// rationale are fishy
+inline thread_local bool insideLogSink = false;
+}  // namespace detail
+
+// Install `sink` as the additional destination for log messages and return the
+// previously installed one. Pass `nullptr` to uninstall. The caller keeps
+// ownership of the sink and has to uninstall it before destroying it.
+inline LogSink* setLogSink(LogSink* sink) {
+  return detail::logSink.exchange(sink, std::memory_order_acq_rel);
+}
+
+namespace detail {
+// A single log statement. Buffers the `<<` chain and, on destruction, writes
+// the formatted line to the global log stream and hands the message to the
+// installed `LogSink`, if any. The writing of the message to the global log
+// stream is protected by a mutex.
+class LogStatement {
+  LogLevel level_;
+  absl::Time timestamp_ = absl::Now();
+  const char* file_;
+  int line_;
+  std::ostringstream buffer_;
+
+ public:
+  LogStatement(LogLevel::Enum level, const char* file, int line)
+      : level_{level}, file_{file}, line_{line} {
+    // Set the locale settings for the buffer.
+    buffer_.imbue(LogstreamChoice::get().getStream().getloc());
+  }
+
+  LogStatement(const LogStatement&) = delete;
+  LogStatement& operator=(const LogStatement&) = delete;
+
+  // The stream that the `<<` chain of the log statement writes to.
+  std::ostream& stream() { return buffer_; }
+
+  ~LogStatement() {
+    // A destructor must not throw. Note that `terminateIfThrows` from
+    // `util/ExceptionHandling.h` cannot be used here, because that header
+    // itself logs.
+    try {
+      writeMessage();
+    } catch (...) {
+    }
+  }
+
+ private:
+  void writeMessage() {
+    std::string message = std::move(buffer_).str();
+    {
+      std::lock_guard lock{logMutex};
+      auto& stream = LogstreamChoice::get().getStream();
+      stream << Log::formatTimestamp(timestamp_) << " - " << level_.toString()
+             << ": " << message;
+      // The `std::endl` and `std::flush` at the call sites used to reach the
+      // output stream directly, but now only act on the buffer.
+      // TODO<qup42> this changes the behaviour to always flush.
+      stream.flush();
+    }
+    emitToSink(message);
+  }
+
+  void emitToSink(std::string_view message) {
+    auto* sink = logSink.load(std::memory_order_acquire);
+    if (sink == nullptr || insideLogSink) {
+      return;
+    }
+    // Messages ending in `\r` are in-place redraws of a `ProgressBar` on the
+    // terminal rather than log events of their own.
+    if (!message.empty() && message.back() == '\r') {
+      return;
+    }
+    if (!message.empty() && message.back() == '\n') {
+      message.remove_suffix(1);
+    }
+    insideLogSink = true;
+    absl::Cleanup resetGuard{[]() { insideLogSink = false; }};
+    sink->emit(LogRecord{level_, timestamp_, message, file_, line_});
   }
 };
+}  // namespace detail
 }  // namespace ad_utility
 
 #endif  // QLEVER_SRC_UTIL_LOG_H

@@ -24,6 +24,7 @@
 #include "util/ReadableNumberFacet.h"
 #include "util/ResourceMonitor.h"
 #include "util/http/HttpProxyConfig.h"
+#include "util/metrics/Logging.h"
 #include "util/metrics/Metrics.h"
 #include "util/metrics/Tracing.h"
 
@@ -57,6 +58,7 @@ int main(int argc, char** argv) {
   unsigned short port;
   bool metricsEnabled = false;
   bool tracingEnabled = false;
+  bool logsEnabled = false;
   NonNegative numSimultaneousQueries = 1;
   bool noMetricsLog = false;
   bool noResourceUsageLog = false;
@@ -260,13 +262,17 @@ int main(int argc, char** argv) {
       "the main server port. Accessing the endpoint requires a valid access "
       "token.");
   add("enable-tracing", po::bool_switch(&tracingEnabled)->default_value(false),
-      "Enable OpenTelemetry tracing of SPARQL operations. Each request then "
-      "produces a trace with one span per phase of its processing. Where the "
+      "Enable OpenTelemetry tracing of HTTP requests. Where the "
       "spans are sent is configured via the standard OTEL environment "
-      "variables: OTEL_TRACES_EXPORTER selects the exporter (\"otlp\" by "
-      "default, or \"console\" to print the spans, or \"none\"), and "
-      "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT the endpoint that OTLP/HTTP sends "
-      "them to (http://localhost:4318/v1/traces by default).");
+      "variables: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT selects the endpoint that "
+      "OTLP/HTTP sends them to (http://localhost:4318/v1/traces by default).");
+  add("enable-logs", po::bool_switch(&logsEnabled)->default_value(false),
+      "Export the log messages via OpenTelemetry. They are still "
+      "printed to standard output as usual, and which of them are exported "
+      "follows the `log-level` parameter, exactly as for the printed log. The "
+      "destination is configured via the standard OTEL environment variables: "
+      "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT selects the endpoint that OTLP/HTTP "
+      "sends them to (http://localhost:4318/v1/logs by default).");
   std::vector<std::string> runtimeParameterAssignments;
   add("set-runtime-parameter",
       po::value<std::vector<std::string>>(&runtimeParameterAssignments)
@@ -306,6 +312,13 @@ int main(int argc, char** argv) {
     std::cerr << "Error in command-line argument: " << e.what() << '\n';
     std::cerr << options << '\n';
     return EXIT_FAILURE;
+  }
+
+  // Set up the export of log messages as early as possible, so that the startup
+  // messages below are exported as well.
+  ad_utility::logging::LoggingHandle loggingHandle;
+  if (logsEnabled) {
+    loggingHandle = ad_utility::logging::initialize();
   }
 
   AD_LOG_INFO << EMPH_ON << "QLever server " << qlever::version::ProjectVersion
