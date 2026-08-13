@@ -13,9 +13,10 @@
 using json = nlohmann::ordered_json;
 using namespace testing;
 
-// Example tracer used in the tests below.
-auto makeTracer = []() {
-  ad_utility::timer::TimeTracer tracer("test");
+// Record the example traces used in the tests below. `TimeTracer` is neither
+// copyable nor movable (it holds references into its own trace tree), so this
+// fills a tracer the caller owns instead of returning one.
+auto fillTracer = [](ad_utility::timer::TimeTracer& tracer) {
   tracer.beginTrace("a");
   tracer.beginTrace("b");
   tracer.endTrace("b");
@@ -23,13 +24,13 @@ auto makeTracer = []() {
   tracer.beginTrace("c");
   tracer.endTrace("c");
   tracer.endTrace("test");
-  return tracer;
 };
 
 // Check the structure of the "short" JSON is as expected.
 TEST(TimeTracerTest, to_json_short) {
   {
-    auto tracer = makeTracer();
+    ad_utility::timer::TimeTracer tracer("test");
+    fillTracer(tracer);
     EXPECT_THAT(
         tracer.getJSONShort(),
         HasKeyMatching(
@@ -48,7 +49,8 @@ TEST(TimeTracerTest, to_json_short) {
 // Check the structure of the "long" JSON is as expected.
 TEST(TimeTracerTest, to_json) {
   {
-    auto tracer = makeTracer();
+    ad_utility::timer::TimeTracer tracer("test");
+    fillTracer(tracer);
     EXPECT_THAT(
         tracer.getJSON(),
         testing::AllOf(

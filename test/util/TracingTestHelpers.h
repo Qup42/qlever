@@ -54,9 +54,16 @@ class ScopedInMemoryTracer {
         previousPropagator_{
             opentelemetry::context::propagation::GlobalTextMapPropagator::
                 GetGlobalPropagator()} {
+    // The buffer has to be given explicitly, because the default of 100 spans
+    // is not enough: a single update request records a span for every phase of
+    // every permutation, and once the buffer is full the exporter *drops the
+    // spans that are added afterwards* rather than the oldest ones. The root
+    // span ends last, so an overflow silently loses exactly the span that most
+    // assertions start from.
+    static constexpr size_t bufferSize = 4096;
     auto exporter =
         opentelemetry::exporter::memory::InMemorySpanExporterFactory::Create(
-            spanData_);
+            spanData_, bufferSize);
     auto provider = opentelemetry::sdk::trace::TracerProviderFactory::Create(
         opentelemetry::sdk::trace::SimpleSpanProcessorFactory::Create(
             std::move(exporter)));

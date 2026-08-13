@@ -49,6 +49,7 @@
 #include "util/http/HttpServer.h"
 #include "util/http/HttpUtils.h"
 #include "util/http/websocket/MessageSender.h"
+#include "util/metrics/TraceSpans.h"
 
 using namespace std::string_literals;
 using namespace ad_utility::url_parser::sparqlOperation;
@@ -901,7 +902,7 @@ CPP_template_def(typename RequestT, typename ResponseT)(
     // We need to copy the query string because `visitOperation` below also
     // needs it.
     auto parsedQuery = [&] {
-      ad_utility::tracing::SpanGuard parseSpan{"parse", rootSpan.context()};
+      ad_utility::tracing::SpanGuard parseSpan{"parsing", rootSpan.context()};
       auto result = SparqlParser::parseQuery(
           &index.encodedIriManager(), query.query_, query.datasetClauses_);
       parseSpan.setOk();
@@ -920,16 +921,12 @@ CPP_template_def(typename RequestT, typename ResponseT)(
     requireValidAccessToken("SPARQL Update");
     // We need to copy the update string because `visitOperation` below also
     // needs it.
-    auto tracer = std::make_shared<ad_utility::timer::TimeTracer>("update");
+    auto tracer = std::make_shared<ad_utility::timer::TimeTracer>(
+        "update", ad_utility::tracing::adoptSpanForTracer(rootSpan.context()));
     tracer->beginTrace("parsing");
-    auto parsedUpdates = [&] {
-      ad_utility::tracing::SpanGuard parseSpan{"parse", rootSpan.context()};
-      auto result = SparqlParser::parseUpdate(
-          index.getBlankNodeManager(), &index.encodedIriManager(),
-          update.update_, update.datasetClauses_);
-      parseSpan.setOk();
-      return result;
-    }();
+    auto parsedUpdates = SparqlParser::parseUpdate(
+        index.getBlankNodeManager(), &index.encodedIriManager(), update.update_,
+        update.datasetClauses_);
     tracer->endTrace("parsing");
     return visitOperation(
         std::move(parsedUpdates), "SPARQL update", std::move(update.update_),
@@ -941,15 +938,12 @@ CPP_template_def(typename RequestT, typename ResponseT)(
   auto visitGraphStore =
       [&request, &visitOperation, &requireValidAccessToken, &index,
        &rootSpan](GraphStoreOperation operation) -> Awaitable<void> {
-    auto tracer = std::make_shared<ad_utility::timer::TimeTracer>("update");
+    auto tracer = std::make_shared<ad_utility::timer::TimeTracer>(
+        "update", ad_utility::tracing::adoptSpanForTracer(rootSpan.context()));
     tracer->beginTrace("parsing");
-    std::vector<ParsedQuery> parsedOperations = [&] {
-      ad_utility::tracing::SpanGuard parseSpan{"parse", rootSpan.context()};
-      auto result = GraphStoreProtocol::transformGraphStoreProtocol(
-          std::move(operation), request, index);
-      parseSpan.setOk();
-      return result;
-    }();
+    std::vector<ParsedQuery> parsedOperations =
+        GraphStoreProtocol::transformGraphStoreProtocol(std::move(operation),
+                                                        request, index);
     tracer->endTrace("parsing");
 
     if (ql::ranges::any_of(parsedOperations, &ParsedQuery::hasUpdateClause)) {
@@ -1287,7 +1281,7 @@ CPP_template_def(typename RequestT, typename ResponseT)(
   // For the same reason (crashes in the conanbuild) we store the coroutine in
   // an explicit variable instead of directly `co_await`-ing it.
   {
-    ad_utility::tracing::SpanGuard planSpan{"plan", parentSpan};
+    ad_utility::tracing::SpanGuard planSpan{"planning", parentSpan};
     auto coroutine = [&] {
       return computeInNewThread(
           queryThreadPool_,
@@ -1412,9 +1406,7 @@ nlohmann::ordered_json Server::createResponseMetadataForUpdate(
 UpdateMetadata Server::processUpdateImpl(
     const Index& index, const PlannedQuery& plannedUpdate,
     ad_utility::SharedCancellationHandle cancellationHandle,
-    DeltaTriples& deltaTriples,
-    const opentelemetry::trace::SpanContext& parentSpan,
-    ad_utility::timer::TimeTracer& tracer) {
+    DeltaTriples& deltaTriples, ad_utility::timer::TimeTracer& tracer) {
   const auto& qet = plannedUpdate.queryExecutionTree();
   AD_CORRECTNESS_CHECK(plannedUpdate.parsedQuery().hasUpdateClause());
 
@@ -1426,15 +1418,11 @@ UpdateMetadata Server::processUpdateImpl(
   updateMetadata.countAfter_ = deltaTriples.getCounts();
 
   tracer.beginTrace("clearCache");
-  {
-    ad_utility::tracing::SpanGuard clearCacheSpan{"clearCache", parentSpan};
-    // Clear the cache, because all cache entries have been invalidated by
-    // the update anyway (The index of the located triples snapshot is
-    // part of the cache key).
-    cache().clearAll();
-    namedResultCache().clear();
-    clearCacheSpan.setOk();
-  }
+  // Clear the cache, because all cache entries have been invalidated by
+  // the update anyway (The index of the located triples snapshot is
+  // part of the cache key).
+  cache().clearAll();
+  namedResultCache().clear();
   tracer.endTrace("clearCache");
 
   return updateMetadata;
@@ -1465,9 +1453,6 @@ CPP_template_def(typename RequestT, typename ResponseT)(
 
   std::vector<UpdateMetadata> metadatas;
 
-  std::optional<ad_utility::tracing::SpanGuard> waitSpan;
-  waitSpan.emplace("waitingForUpdateThread", parentSpan);
-
   // If multiple updates are part of a single request, those have to run
   // atomically. This is ensured, because the updates below are run on the
   // `updateThreadPool_`, which only has a single thread.
@@ -1475,10 +1460,8 @@ CPP_template_def(typename RequestT, typename ResponseT)(
   auto coroutine = computeInNewThread(
       updateThreadPool_,
       [this, &makeQec, &requestTimer, &cancellationHandle, &updates, &timeLimit,
-       &plannedUpdate, outerTracer, &metadatas, &waitSpan, &parentSpan]() {
+       &plannedUpdate, outerTracer, &metadatas, &parentSpan]() {
         outerTracer->endTrace("waitingForUpdateThread");
-        waitSpan->setOk();
-        waitSpan.reset();
         // Snapshot and build the context on the update thread (see
         // `clear-delta-triples`), so the update sees and modifies the currently
         // active index. The resulting `plannedUpdate` keeps the context alive
@@ -1495,50 +1478,37 @@ CPP_template_def(typename RequestT, typename ResponseT)(
                   deltaTriples.getLocatedTriplesSharedStateReference());
               json results = json::array();
               for (auto&& [i, update] : ranges::views::enumerate(updates)) {
-                auto tracer = ad_utility::timer::TimeTracer("update");
                 // A request can contain multiple chained updates. Group each
-                // update with a span.
+                // update with a span. The tracer adopts that span, so that the
+                // phases it records below become children of it.
                 ad_utility::tracing::SpanGuard updateSpan{"update", parentSpan};
                 updateSpan.span().SetAttribute("qlever.update.index",
                                                static_cast<int64_t>(i));
+                auto tracer = ad_utility::timer::TimeTracer(
+                    "update", ad_utility::tracing::adoptSpanForTracer(
+                                  updateSpan.context()));
                 // The augmented metadata is invalidated by any update. It is
                 // only updated automatically at the end of modify. Updates with
                 // non-empty graph patterns need the augmented metadata. Update
                 // the augmented metadata before executing those updates.
                 tracer.beginTrace("updateMetadata");
-                {
-                  ad_utility::tracing::SpanGuard metadataSpan{
-                      "updateMetadata", updateSpan.context()};
-                  if (i != 0 &&
-                      !update._rootGraphPattern._graphPatterns.empty()) {
-                    deltaTriples.updateAugmentedMetadata();
-                  }
-                  metadataSpan.setOk();
+                if (i != 0 &&
+                    !update._rootGraphPattern._graphPatterns.empty()) {
+                  deltaTriples.updateAugmentedMetadata();
                 }
                 tracer.endTrace("updateMetadata");
                 tracer.beginTrace("planning");
-                {
-                  ad_utility::tracing::SpanGuard planSpan{"plan",
-                                                          updateSpan.context()};
-                  plannedUpdate =
-                      planQuery(std::move(update), qec, cancellationHandle,
-                                timeLimit, requestTimer);
-                  planSpan.setOk();
-                }
+                plannedUpdate =
+                    planQuery(std::move(update), qec, cancellationHandle,
+                              timeLimit, requestTimer);
                 tracer.endTrace("planning");
                 tracer.beginTrace("execution");
                 // Update the delta triples.
                 // Use `this` explicitly to silence false-positive
                 // errors on captured `this` being unused.
-                auto updateMetadata = [&] {
-                  ad_utility::tracing::SpanGuard executeSpan{
-                      "execute", updateSpan.context()};
-                  auto result = this->processUpdateImpl(
-                      index, plannedUpdate.value(), cancellationHandle,
-                      deltaTriples, executeSpan.context(), tracer);
-                  executeSpan.setOk();
-                  return result;
-                }();
+                auto updateMetadata = this->processUpdateImpl(
+                    index, plannedUpdate.value(), cancellationHandle,
+                    deltaTriples, tracer);
                 tracer.endTrace("execution");
 
                 tracer.endTrace("update");

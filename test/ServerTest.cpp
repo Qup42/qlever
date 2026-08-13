@@ -731,10 +731,10 @@ TEST(ServerTest, tracingOfQueryRequest) {
   responseBodyToString(std::move(response.body()));
 
   auto spans = scopedTracer.spans();
-  ASSERT_EQ(spans.size(), 4) << "expected root, parse, plan and export";
+  ASSERT_EQ(spans.size(), 4) << "expected root, parsing, planning and export";
   const auto* root = findSpan(spans, "POST /sparql");
-  const auto* parse = findSpan(spans, "parse");
-  const auto* plan = findSpan(spans, "plan");
+  const auto* parse = findSpan(spans, "parsing");
+  const auto* plan = findSpan(spans, "planning");
   const auto* exportSpan = findSpan(spans, "export");
   ASSERT_TRUE(root && parse && plan && exportSpan);
 
@@ -896,7 +896,7 @@ TEST(ServerTest, tracingOfUpdateRequest) {
 
   auto spans = scopedTracer.spans();
   const auto* root = findSpan(spans, "POST /sparql");
-  const auto* parse = findSpan(spans, "parse");
+  const auto* parse = findSpan(spans, "parsing");
   const auto* waiting = findSpan(spans, "waitingForUpdateThread");
   ASSERT_TRUE(root && parse && waiting);
   EXPECT_EQ(attribute(*root, "db.operation.name"), "UPDATE");
@@ -927,7 +927,7 @@ TEST(ServerTest, tracingOfUpdateRequest) {
   EXPECT_THAT(indices, testing::UnorderedElementsAre(0, 1));
 
   // Each part has its own phases, and each phase belongs to exactly one part.
-  // `clearCache` sits under `execute`, which is what makes the nesting worth
+  // `clearCache` sits under `execution`, which is what makes the nesting worth
   // having: it attributes the cache invalidation to the update that caused it.
   auto parentIds = [&spans](std::string_view name) {
     std::vector<opentelemetry::trace::SpanId> result;
@@ -938,7 +938,7 @@ TEST(ServerTest, tracingOfUpdateRequest) {
     }
     return result;
   };
-  for (std::string_view phase : {"updateMetadata", "plan", "execute"}) {
+  for (std::string_view phase : {"updateMetadata", "planning", "execution"}) {
     auto parents = parentIds(phase);
     ASSERT_EQ(parents.size(), 2) << "one " << phase << " span per part";
     EXPECT_THAT(parents,
@@ -949,7 +949,7 @@ TEST(ServerTest, tracingOfUpdateRequest) {
   auto executeIds = [&spans]() {
     std::vector<opentelemetry::trace::SpanId> result;
     for (const auto& span : spans) {
-      if (span->GetName() == "execute") {
+      if (span->GetName() == "execution") {
         result.push_back(span->GetSpanId());
       }
     }
