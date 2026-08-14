@@ -26,7 +26,7 @@ jobs:
       fail-fast: false
       matrix:
         compiler: [gcc, clang]
-        compiler-version: [8, 11, 12, 13, 18, 21]
+        compiler-version: [11, 12, 13, 18, 21]
         warnings: [  "-Wall -Wextra -Werror " ]
         build-type: [Release]
         expensive-tests: [true]
@@ -36,16 +36,12 @@ jobs:
         skipIfPr: [false]
         exclude:
           - compiler: gcc
-            compiler-version: 8
-          - compiler: gcc
             compiler-version: 12
             isPr: true
           - compiler: gcc
             compiler-version: 18
           - compiler: gcc
             compiler-version: 21
-          - compiler: clang
-            compiler-version: 8
           - compiler: clang
             compiler-version: 11
           - compiler: clang
