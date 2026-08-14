@@ -49,9 +49,6 @@ jobs:
           - compiler: clang
             compiler-version: 13
           - compiler: clang
-            compiler-version: 16
-            isPr: true
-          - compiler: clang
             compiler-version: 18
             isPr: true
         include:
