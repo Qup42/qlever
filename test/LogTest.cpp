@@ -50,9 +50,10 @@ TEST(LogTest, StringConversions) {
 
 // _____________________________________________________________________________
 TEST(LogTest, SetRuntimeLogLevel) {
-  // Setting to INFO requires LOGLEVEL >= INFO at compile time; skip otherwise.
+  // Setting to INFO requires a compile-time log level of at least INFO;
+  // skip otherwise.
   ENFORCE_LOG_LEVEL_OR_SKIP(INFO);
-  ad_utility::ScopedLogLevel scopedLogLevel{FATAL};
+  ad_utility::ScopedLogLevel scopedLogLevel{LogLevel::Enum::FATAL};
   EXPECT_EQ(ad_utility::detail::runtimeLogLevel.load(), LogLevel::Enum::FATAL);
 
   // Setting to INFO must succeed (ENFORCE_LOG_LEVEL_OR_SKIP(INFO) guards this).
@@ -62,13 +63,14 @@ TEST(LogTest, SetRuntimeLogLevel) {
 
 // _____________________________________________________________________________
 TEST(LogTest, ExceptionOnTooVerboseLevel) {
-  // If the compile-time LOGLEVEL is already TRACE, every runtime level is
+  // If the compile-time log level is already TRACE, every runtime level is
   // valid — there is nothing to throw, so we skip.
-  if constexpr (LOGLEVEL >= LogLevel::Enum::TRACE) {
-    GTEST_SKIP() << "LOGLEVEL is already TRACE; no more-verbose level exists.";
+  if constexpr (ad_utility::compileTimeLogLevel >= LogLevel::Enum::TRACE) {
+    GTEST_SKIP() << "The compile-time log level is already TRACE; no "
+                    "more-verbose level exists.";
   } else {
-    constexpr auto tooVerbose =
-        static_cast<LogLevel::Enum>(static_cast<int>(LOGLEVEL) + 1);
+    constexpr auto tooVerbose = static_cast<LogLevel::Enum>(
+        static_cast<int>(ad_utility::compileTimeLogLevel) + 1);
     AD_EXPECT_THROW_WITH_MESSAGE(
         ad_utility::setRuntimeLogLevel(LogLevel{tooVerbose}),
         ::testing::HasSubstr("compile-time log level"));
@@ -79,7 +81,7 @@ TEST(LogTest, ExceptionOnTooVerboseLevel) {
 // `Log::imbue` affects the stream that is currently used for logging, and not
 // hardcodedly `std::cout`.
 TEST(LogTest, Imbue) {
-  ad_utility::ScopedLogLevel scopedLogLevel{FATAL};
+  ad_utility::ScopedLogLevel scopedLogLevel{LogLevel::Enum::FATAL};
   auto [streamCleanup, ss] = setGlobalLoggingStreamToStringStream();
 
   // Without an imbued locale, large numbers are printed without separators.
@@ -190,13 +192,13 @@ struct DefaultLogger {
 
   template <typename... Args>
   void operator()(LogLevel::Enum level, const Args&... args) const {
-    AD_LOG(level) << lazyLogArgs(args...);
+    AD_LOG_IMPL(level) << lazyLogArgs(args...);
   }
 
   // See `BranchingLogger::logManipulators`.
   void logManipulators(LogLevel::Enum level) const {
-    AD_LOG(level) << std::endl;
-    AD_LOG(level) << std::setw(4) << 42 << "\n";
+    AD_LOG_IMPL(level) << std::endl;
+    AD_LOG_IMPL(level) << std::setw(4) << 42 << "\n";
   }
 };
 
@@ -226,7 +228,7 @@ TYPED_TEST_SUITE(LogTestTyped, Loggers, LoggerName);
 TYPED_TEST(LogTestTyped, StreamFiltering) {
   // FATAL (0) always passes the compile-time guards. ERROR (1) is suppressed at
   // runtime when the level is set to FATAL.
-  ad_utility::ScopedLogLevel scopedLogLevel{FATAL};
+  ad_utility::ScopedLogLevel scopedLogLevel{LogLevel::Enum::FATAL};
   auto [streamCleanup, ss] = setGlobalLoggingStreamToStringStream();
 
   TypeParam{}(LogLevel::Enum::FATAL, "hello-fatal");
@@ -241,7 +243,7 @@ TYPED_TEST(LogTestTyped, StreamFiltering) {
 // Log messages that consist of several arguments of different types are written
 // correctly, and a suppressed message produces no output at all.
 TYPED_TEST(LogTestTyped, MultipleArguments) {
-  ad_utility::ScopedLogLevel scopedLogLevel{FATAL};
+  ad_utility::ScopedLogLevel scopedLogLevel{LogLevel::Enum::FATAL};
   auto [streamCleanup, ss] = setGlobalLoggingStreamToStringStream();
 
   TypeParam{}(LogLevel::Enum::FATAL, "a=", 42, " b=", std::string{"str"}, '!');
@@ -256,7 +258,7 @@ TYPED_TEST(LogTestTyped, MultipleArguments) {
 // The arguments of a message that is actually logged are always evaluated, no
 // matter which of the loggers is used.
 TYPED_TEST(LogTestTyped, ArgumentsOfLoggedMessageAreEvaluated) {
-  ad_utility::ScopedLogLevel scopedLogLevel{FATAL};
+  ad_utility::ScopedLogLevel scopedLogLevel{LogLevel::Enum::FATAL};
   auto [streamCleanup, ss] = setGlobalLoggingStreamToStringStream();
 
   size_t numEvaluations = 0;
@@ -274,7 +276,7 @@ TYPED_TEST(LogTestTyped, ArgumentsOfLoggedMessageAreEvaluated) {
 // (which then discards the output), but not by the branching logger, which
 // doesn't evaluate them at all.
 TYPED_TEST(LogTestTyped, ArgumentsOfSuppressedMessage) {
-  ad_utility::ScopedLogLevel scopedLogLevel{FATAL};
+  ad_utility::ScopedLogLevel scopedLogLevel{LogLevel::Enum::FATAL};
   auto [streamCleanup, ss] = setGlobalLoggingStreamToStringStream();
 
   size_t numEvaluations = 0;
@@ -294,7 +296,7 @@ TYPED_TEST(LogTestTyped, ArgumentsOfSuppressedMessage) {
 // message are evaluated. Without this guarantee, the branchless logger would
 // deadlock here.
 TYPED_TEST(LogTestTyped, ArgumentsOfSuppressedMessageMayLog) {
-  ad_utility::ScopedLogLevel scopedLogLevel{FATAL};
+  ad_utility::ScopedLogLevel scopedLogLevel{LogLevel::Enum::FATAL};
   auto [streamCleanup, ss] = setGlobalLoggingStreamToStringStream();
 
   auto loggingArgument = [] {
@@ -314,7 +316,7 @@ TYPED_TEST(LogTestTyped, ArgumentsOfSuppressedMessageMayLog) {
 // Messages that start with a stream manipulator are logged correctly, and are
 // suppressed if their level doesn't pass the runtime log level.
 TYPED_TEST(LogTestTyped, Manipulators) {
-  ad_utility::ScopedLogLevel scopedLogLevel{FATAL};
+  ad_utility::ScopedLogLevel scopedLogLevel{LogLevel::Enum::FATAL};
   auto [streamCleanup, ss] = setGlobalLoggingStreamToStringStream();
 
   TypeParam{}.logManipulators(LogLevel::Enum::FATAL);
@@ -382,7 +384,7 @@ TYPED_TEST(LogTestTyped, ThreadSafety) {
 
 // _____________________________________________________________________________
 TEST(LogTest, GetRuntimeLogLevel) {
-  ad_utility::ScopedLogLevel scopedLogLevel{FATAL};
+  ad_utility::ScopedLogLevel scopedLogLevel{LogLevel::Enum::FATAL};
   EXPECT_EQ(ad_utility::getRuntimeLogLevel(), LogLevel::Enum::FATAL);
   EXPECT_EQ(ad_utility::getRuntimeLogLevel(),
             ad_utility::detail::runtimeLogLevel.load());
@@ -394,7 +396,7 @@ TEST(LogTest, ScopedLogLevelSetsAndRestoresLevel) {
   // level if one of the assertions below fails and the scope is left early.
   ENFORCE_LOG_LEVEL_OR_SKIP(WARN);
   {
-    ad_utility::ScopedLogLevel scopedLogLevel{FATAL};
+    ad_utility::ScopedLogLevel scopedLogLevel{LogLevel::Enum::FATAL};
     EXPECT_EQ(ad_utility::getRuntimeLogLevel(), LogLevel::Enum::FATAL);
   }
   EXPECT_EQ(ad_utility::getRuntimeLogLevel(), LogLevel::Enum::WARN);
@@ -404,7 +406,7 @@ TEST(LogTest, ScopedLogLevelSetsAndRestoresLevel) {
 TEST(LogTest, ScopedLogLevelRestoresLevelOnException) {
   ENFORCE_LOG_LEVEL_OR_SKIP(WARN);
   auto throwFromInsideTheScope = [] {
-    ad_utility::ScopedLogLevel scopedLogLevel{FATAL};
+    ad_utility::ScopedLogLevel scopedLogLevel{LogLevel::Enum::FATAL};
     EXPECT_EQ(ad_utility::getRuntimeLogLevel(), LogLevel::Enum::FATAL);
     throw std::runtime_error{"Thrown inside the scope."};
   };
@@ -416,10 +418,10 @@ TEST(LogTest, ScopedLogLevelRestoresLevelOnException) {
 TEST(LogTest, ScopedLogLevelIsNested) {
   ENFORCE_LOG_LEVEL_OR_SKIP(WARN);
   {
-    ad_utility::ScopedLogLevel outer{ERROR};
+    ad_utility::ScopedLogLevel outer{LogLevel::Enum::ERROR};
     EXPECT_EQ(ad_utility::getRuntimeLogLevel(), LogLevel::Enum::ERROR);
     {
-      ad_utility::ScopedLogLevel inner{FATAL};
+      ad_utility::ScopedLogLevel inner{LogLevel::Enum::FATAL};
       EXPECT_EQ(ad_utility::getRuntimeLogLevel(), LogLevel::Enum::FATAL);
     }
     // The inner object restores the level that the outer object has set.
@@ -430,19 +432,21 @@ TEST(LogTest, ScopedLogLevelIsNested) {
 
 // _____________________________________________________________________________
 TEST(LogTest, ScopedLogLevelClampsToCompileTimeLogLevel) {
-  // If the compile-time `LOGLEVEL` is already `TRACE`, then there is no more
+  // If the compile-time log level is already `TRACE`, then there is no more
   // verbose level that could be clamped.
-  if constexpr (LOGLEVEL >= LogLevel::Enum::TRACE) {
-    GTEST_SKIP() << "LOGLEVEL is already TRACE; no more-verbose level exists.";
+  if constexpr (ad_utility::compileTimeLogLevel >= LogLevel::Enum::TRACE) {
+    GTEST_SKIP() << "The compile-time log level is already TRACE; no "
+                    "more-verbose level exists.";
   } else {
-    constexpr auto tooVerbose =
-        static_cast<LogLevel::Enum>(static_cast<int>(LOGLEVEL) + 1);
-    ad_utility::ScopedLogLevel outerLogLevel{FATAL};
+    constexpr auto tooVerbose = static_cast<LogLevel::Enum>(
+        static_cast<int>(ad_utility::compileTimeLogLevel) + 1);
+    ad_utility::ScopedLogLevel outerLogLevel{LogLevel::Enum::FATAL};
     {
-      // Requesting a more verbose level than the compile-time `LOGLEVEL` must
-      // neither throw nor exceed that `LOGLEVEL`.
+      // Requesting a more verbose level than the compile-time log level must
+      // neither throw nor exceed that log level.
       ad_utility::ScopedLogLevel scopedLogLevel{tooVerbose};
-      EXPECT_EQ(ad_utility::getRuntimeLogLevel(), LOGLEVEL);
+      EXPECT_EQ(ad_utility::getRuntimeLogLevel(),
+                ad_utility::compileTimeLogLevel);
     }
     EXPECT_EQ(ad_utility::getRuntimeLogLevel(), LogLevel::Enum::FATAL);
   }
@@ -453,7 +457,7 @@ TEST(LogTest, ScopedLogLevelSuppressesLogOutput) {
   ENFORCE_LOG_LEVEL_OR_SKIP(ERROR);
   auto [streamCleanup, ss] = setGlobalLoggingStreamToStringStream();
   {
-    ad_utility::ScopedLogLevel scopedLogLevel{FATAL};
+    ad_utility::ScopedLogLevel scopedLogLevel{LogLevel::Enum::FATAL};
     AD_LOG_ERROR << "hello-scoped-error";
     EXPECT_THAT(ss.str(),
                 ::testing::Not(::testing::HasSubstr("hello-scoped-error")));
