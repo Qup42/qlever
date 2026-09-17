@@ -178,8 +178,7 @@ void Server::initializeServerMetrics(
                           .getCurrentLocatedTriplesSharedState()
                           ->counts_;
         AD_CORRECTNESS_CHECK(counts.has_value());
-        auto [ins, del] = counts.value();
-        return ins + del;
+        return counts.value();
       },
       [this]() -> int64_t { return allocator().amountMemoryLeft().getBytes(); },
       [this]() -> int64_t {
@@ -189,7 +188,10 @@ void Server::initializeServerMetrics(
       [this]() -> int64_t {
         return static_cast<int64_t>(rebuildInProgress_.load());
       },
-      memoryLimit);
+      memoryLimit,
+      [this]() -> int64_t {
+        return indexAndViewsSnapshot()->index_.numTriples().normal;
+      });
   metrics_->registerCallbacks();
 }
 
