@@ -7,6 +7,7 @@
 #ifndef QLEVER_SRC_UTIL_LOG_H
 #define QLEVER_SRC_UTIL_LOG_H
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 #include <absl/time/clock.h>
@@ -17,8 +18,11 @@
 #include <iostream>
 #include <locale>
 #include <mutex>
+#include <optional>
 #include <sstream>
+#include <streambuf>
 #include <string>
+#include <string_view>
 
 #include "backports/keywords.h"
 #include "util/EnumWithStrings.h"
@@ -104,26 +108,26 @@ inline constexpr LogLevel::Enum compileTimeLogLevel =
 // spell the log levels out as `ad_utility::LogLevel::Enum::DEBUG` etc.
 using LogLevel = ad_utility::LogLevel;
 
-// The branching logger: both the compile-time level (`compileTimeLogLevel`)
-// and the runtime level must pass for a message to be logged. Nothing after
-// the `<<` is evaluated for a suppressed message, which makes this variant
+// The branching logger: both the compile-time level (`compileTimeLogLevel`) and
+// the runtime level must pass for a message to be logged. Nothing after the
+// `<<` is evaluated for a suppressed message, which makes this variant
 // efficient, but also introduces a branch at every single call site, which is
-// unfriendly to coverage measurements. The `LogLock` temporary is held for the
-// entire `<<` chain and released at the semicolon that ends the statement.
-#define AD_LOG_BRANCHING(x)                                         \
-  if (!::ad_utility::detail::logLevelIsEnabled(x))                  \
-    ;                                                               \
-  else                                                              \
-    (::ad_utility::detail::LogLock{::ad_utility::detail::logMutex}, \
-     ::ad_utility::Log::getLog(x))  // NOLINT
+// unfriendly to coverage measurements. The `LogStreamProxy` temporary is held
+// for the entire
+// `<<` chain and destroyed at the semicolon that ends the statement.
+#define AD_LOG_BRANCHING(x)                        \
+  if (!::ad_utility::detail::logLevelIsEnabled(x)) \
+    ;                                              \
+  else                                             \
+    ::ad_utility::getLogStream(x, __FILE__, __LINE__)  // NOLINT
 
 // The branchless logger: a plain function call that always returns a stream
-// (see `ad_utility::getLogStreamBranchless`). For a suppressed message that
-// stream discards its input, so the arguments after the `<<` are always
-// evaluated (which is less efficient), but the call site contains no branch at
-// all (which is friendly to coverage measurements, as the single branch lives
-// in this header instead of in each of the hundreds of call sites).
-#define AD_LOG_BRANCHLESS(x) ::ad_utility::getLogStreamBranchless(x)
+// (see `ad_utility::getLogStream`). For a suppressed message that stream
+// discards its input, so the arguments after the `<<` are always evaluated
+// (which is less efficient), but the call site contains no branch at all
+// (which is friendly to coverage measurements, as the single branch lives in
+// this header instead of in each of the hundreds of call sites).
+#define AD_LOG_BRANCHLESS(x) ::ad_utility::getLogStream(x, __FILE__, __LINE__)
 
 // The logger that is actually used by the `AD_LOG_...` macros below. This is
 // the only place where the choice between the two styles above is made; it is
@@ -152,8 +156,7 @@ namespace ad_utility {
 
 namespace detail {
 // Global mutex to ensure log messages from different threads are not
-// interleaved (acquired via the comma-operator trick in the `AD_LOG_BRANCHING`
-// macro and by the `LogStreamProxy` of the branchless logger).
+// interleaved (acquired by the `LogStreamProxy` that both loggers return).
 inline std::mutex logMutex;
 
 static constexpr LogLevel::Enum defaultLogLevel =
@@ -164,8 +167,8 @@ static constexpr LogLevel::Enum defaultLogLevel =
 inline std::atomic<LogLevel::Enum> runtimeLogLevel = defaultLogLevel;
 // A stream that discards everything that is written to it. It is created from
 // a null `streambuf`, so it is in a `bad` state from the start and every
-// insertion into it is a cheap no-op. It is used by the branchless logger for
-// messages that are suppressed by the compile-time or the runtime log level.
+// insertion into it is a cheap no-op. It is used for messages that are
+// suppressed by the compile-time or the runtime log level.
 inline std::ostream& nullStream() {
   static std::ostream stream{nullptr};
   return stream;
@@ -177,13 +180,6 @@ inline bool logLevelIsEnabled(LogLevel::Enum level) {
   return level <= compileTimeLogLevel &&
          level <= runtimeLogLevel.load(std::memory_order_relaxed);
 }
-
-// Non-[[nodiscard]] wrapper so the comma-operator pattern doesn't trigger
-// -Wunused-value warnings (std::lock_guard itself is [[nodiscard]] in libc++).
-struct LogLock {
-  std::lock_guard<std::mutex> lock_;
-  explicit LogLock(std::mutex& m) : lock_{m} {}
-};
 }  // namespace detail
 
 // Set the runtime log level. Throws if `level` is more verbose than the
@@ -288,11 +284,17 @@ class Log {
   // Write the prefix (timestamp and log level) of a single log message to the
   // global logging stream and return that stream. Note: The caller has to hold
   // the `detail::logMutex` while calling this and while writing the message
-  // itself, see the `AD_LOG_BRANCHING` macro and the `LogStreamProxy` class.
-  static std::ostream& getLog(LogLevel::Enum level) {
+  // itself, see the `LogStreamProxy` class.
+  static std::ostream& getLog(LogLevel::Enum level, absl::Time timestamp) {
     // Use the singleton logging stream as target.
     return LogstreamChoice::get().getStream()
-           << getTimeStamp() << " - " << LogLevel{level}.toString() << ": ";
+           << formatTimestamp(timestamp) << " - " << LogLevel{level}.toString()
+           << ": ";
+  }
+
+  // Overload that uses the current time as the timestamp.
+  static std::ostream& getLog(LogLevel::Enum level) {
+    return getLog(level, absl::Now());
   }
 
   // Imbue the stream that is currently used for logging with the given
@@ -303,33 +305,199 @@ class Log {
     LogstreamChoice::get().getStream().imbue(locale);
   }
 
-  static std::string getTimeStamp() {
-    return absl::FormatTime("%Y-%m-%d %H:%M:%E3S", absl::Now(),
-                            absl::LocalTimeZone());
+  static std::string formatTimestamp(absl::Time time) {
+    return absl::FormatTime("%Y-%m-%d %H:%M:%E3S", time, absl::LocalTimeZone());
   }
+
+  static std::string getTimeStamp() { return formatTimestamp(absl::Now()); }
 };
 
-// The stream-like object that is returned by the branchless logger (see the
-// `AD_LOG_BRANCHLESS` macro). It holds a reference to the stream that the
-// message is written to and, if the message is actually logged, the global log
-// mutex. As it is returned by value, the temporary lives until the end of the
-// full expression, so the mutex is held for the complete `<<` chain, exactly as
-// for the branching logger. For a suppressed message, the mutex is not acquired
-// (also exactly as for the branching logger), so the arguments of a suppressed
-// message may safely log or take other locks, even though they are evaluated.
+// One complete log message, as handed to a `LogSink`. The string views point
+// into storage owned by the caller and are only valid for the duration of the
+// `emit` call.
+struct LogRecord {
+  LogLevel level_;
+  absl::Time timestamp_;
+  // The message without the `<timestamp> - <LEVEL>: ` prefix and without a
+  // trailing newline.
+  std::string_view message_;
+  std::string_view file_;
+  int line_;
+};
+
+// An additional destination for log messages, besides the textual log stream.
+class LogSink {
+ public:
+  virtual ~LogSink() = default;
+  virtual void emit(const LogRecord& record) = 0;
+};
+
+namespace detail {
+// The currently installed sink, or `nullptr` if there is none. Read at most
+// once per log message, so a plain `atomic` is enough.
+inline std::atomic<LogSink*> logSink = nullptr;
+
+// True while a message is being handed to the sink. A sink that logs itself,
+// directly or indirectly, would otherwise recurse infinitely; such nested
+// messages only go to the textual log.
+inline thread_local bool insideLogSink = false;
+}  // namespace detail
+
+// Install `sink` as an additional destination for log messages and return the
+// previously installed one (`nullptr` if there was none). Pass `nullptr` to
+// uninstall. The caller keeps the ownership of the sink and has to uninstall it
+// before destroying it.
+inline LogSink* setLogSink(LogSink* sink) {
+  return detail::logSink.exchange(sink, std::memory_order_acq_rel);
+}
+
+namespace detail {
+// A `streambuf` that forwards everything that is written to it to another
+// `streambuf` and additionally appends it to a string. This way the message of
+// a log statement still goes to the textual log immediately (in particular, it
+// is not lost if the process dies in the middle of the statement), and is at
+// the same time available as a whole once the statement is complete.
+class TeeStreambuf : public std::streambuf {
+ private:
+  std::streambuf* target_;
+  std::string captured_;
+
+ public:
+  explicit TeeStreambuf(std::streambuf* target) : target_{target} {}
+
+  // Everything that was written so far.
+  const std::string& captured() const { return captured_; }
+
+ protected:
+  int_type overflow(int_type c) override {
+    if (traits_type::eq_int_type(c, traits_type::eof())) {
+      return traits_type::not_eof(c);
+    }
+    auto character = traits_type::to_char_type(c);
+    captured_.push_back(character);
+    return target_->sputc(character);
+  }
+
+  std::streamsize xsputn(const char* s, std::streamsize count) override {
+    captured_.append(s, static_cast<size_t>(count));
+    return target_->sputn(s, count);
+  }
+
+  int sync() override { return target_->pubsync(); }
+};
+
+// The additional state that a log statement needs while a `LogSink` is
+// installed. The message is written to `stream()`, which tees it into the
+// textual log and into a buffer, from which it is handed to the sink when the
+// statement is complete.
+class SinkCapture {
+ private:
+  LogSink* sink_;
+  TeeStreambuf buffer_;
+  std::ostream stream_;
+  LogLevel level_;
+  absl::Time timestamp_;
+  const char* file_;
+  int line_;
+
+ public:
+  SinkCapture(LogSink* sink, std::ostream& target, LogLevel::Enum level,
+              absl::Time timestamp, const char* file, int line)
+      : sink_{sink},
+        buffer_{target.rdbuf()},
+        stream_{&buffer_},
+        level_{level},
+        timestamp_{timestamp},
+        file_{file},
+        line_{line} {
+    // The message has to be formatted exactly as in the textual log, in
+    // particular with the locale that was set via `Log::imbue`.
+    stream_.imbue(target.getloc());
+  }
+
+  SinkCapture(const SinkCapture&) = delete;
+  SinkCapture& operator=(const SinkCapture&) = delete;
+
+  // The stream that the `<<` chain of the log statement writes to.
+  std::ostream& stream() { return stream_; }
+
+  // Hand the complete message to the sink. Called from the destructor of the
+  // `LogStreamProxy`, which must not throw. Note that `terminateIfThrows` from
+  // `util/ExceptionHandling.h` cannot be used here, because that header itself
+  // logs.
+  void emit() noexcept {
+    try {
+      std::string_view message = buffer_.captured();
+      // Messages ending in `\r` are in-place redraws of a `ProgressBar` on the
+      // terminal rather than log events of their own.
+      if (!message.empty() && message.back() == '\r') {
+        return;
+      }
+      // The `LogRecord` holds the message without the trailing newline.
+      if (!message.empty() && message.back() == '\n') {
+        message.remove_suffix(1);
+      }
+      insideLogSink = true;
+      absl::Cleanup resetGuard{[]() { insideLogSink = false; }};
+      sink_->emit(LogRecord{level_, timestamp_, message, file_, line_});
+    } catch (...) {
+    }
+  }
+};
+}  // namespace detail
+
+// The stream-like object that is returned by both loggers (see the
+// `AD_LOG_BRANCHING` and `AD_LOG_BRANCHLESS` macros). It holds a reference to
+// the stream that the message is written to and, if the message is actually
+// logged, the global log mutex. As it is returned by value, the temporary lives
+// until the end of the full expression, so the mutex is held for the complete
+// `<<` chain. For a suppressed message, the mutex is not acquired, so the
+// arguments of a suppressed message may safely log or take other locks, even
+// though the branchless logger evaluates them.
 class LogStreamProxy {
  private:
   std::unique_lock<std::mutex> lock_;
   std::ostream* stream_ = &detail::nullStream();
+  // Only present while a `LogSink` is installed. Handed the complete message
+  // by the destructor below.
+  std::optional<detail::SinkCapture> capture_;
 
  public:
   // If a message with the given `level` has to be logged, acquire the global
   // log mutex and write the prefix of the message. Otherwise, the message is
   // written to the null stream, which discards it.
-  explicit LogStreamProxy(LogLevel::Enum level) {
-    if (detail::logLevelIsEnabled(level)) {
-      lock_ = std::unique_lock{detail::logMutex};
-      stream_ = &Log::getLog(level);
+  //
+  // NOTE: The level is checked here even though the branching logger has
+  // already checked it at the call site. That check is a single relaxed load,
+  // and it only happens for messages that are logged anyway, which then do I/O
+  // under a mutex.
+  explicit LogStreamProxy(LogLevel::Enum level, const char* file, int line) {
+    if (!detail::logLevelIsEnabled(level)) {
+      return;
+    }
+    lock_ = std::unique_lock{detail::logMutex};
+    auto timestamp = absl::Now();
+    stream_ = &Log::getLog(level, timestamp);
+    auto* sink = detail::logSink.load(std::memory_order_acquire);
+    if (sink != nullptr && !detail::insideLogSink) {
+      capture_.emplace(sink, *stream_, level, timestamp, file, line);
+      stream_ = &capture_.value().stream();
+    }
+  }
+
+  LogStreamProxy(const LogStreamProxy&) = delete;
+  LogStreamProxy& operator=(const LogStreamProxy&) = delete;
+
+  // Hand the complete message to the installed `LogSink`, if any.
+  ~LogStreamProxy() {
+    if (capture_.has_value()) {
+      // Release the global log mutex first. A sink may well log itself, and
+      // the `insideLogSink` guard only breaks the infinite recursion, not the
+      // deadlock on the (non-recursive) mutex.
+      if (lock_.owns_lock()) {
+        lock_.unlock();
+      }
+      capture_.value().emit();
     }
   }
 
@@ -348,13 +516,14 @@ class LogStreamProxy {
   }
 };
 
-// The implementation of the `AD_LOG_BRANCHLESS` macro: always return a stream,
-// which discards the message if it is suppressed by the compile-time or the
-// runtime log level. Note: The `LogStreamProxy` is neither copyable nor
-// movable, returning it by value works because of the guaranteed copy elision
-// for prvalues.
-inline LogStreamProxy getLogStreamBranchless(LogLevel::Enum level) {
-  return LogStreamProxy{level};
+// The implementation of both logger macros: always return a stream, which
+// discards the message if it is suppressed by the compile-time or the runtime
+// log level. Note: The `LogStreamProxy` is neither copyable nor movable,
+// returning it by value works because of the guaranteed copy elision for
+// prvalues.
+inline LogStreamProxy getLogStream(LogLevel::Enum level, const char* file,
+                                   int line) {
+  return LogStreamProxy{level, file, line};
 }
 }  // namespace ad_utility
 

@@ -7,7 +7,10 @@
 // You may not use this file except in compliance with the Apache 2.0 License,
 // which can be found in the `LICENSE` file at the root of the QLever project.
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_split.h>
+#include <absl/time/clock.h>
+#include <absl/time/time.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -465,4 +468,172 @@ TEST(LogTest, ScopedLogLevelSuppressesLogOutput) {
   // Outside of the scope, the message is logged again.
   AD_LOG_ERROR << "hello-scoped-error";
   EXPECT_THAT(ss.str(), ::testing::HasSubstr("hello-scoped-error"));
+}
+
+namespace {
+
+// A `LogSink` that stores copies of the records it receives. Copies are
+// necessary because the string views of a `LogRecord` are only valid for the
+// duration of the `emit` call.
+class CollectingSink : public ad_utility::LogSink {
+ public:
+  struct Record {
+    LogLevel level_;
+    absl::Time timestamp_;
+    std::string message_;
+    std::string file_;
+    int line_;
+  };
+  std::vector<Record> records_;
+
+  void emit(const ad_utility::LogRecord& record) override {
+    records_.push_back(Record{record.level_, record.timestamp_,
+                              std::string{record.message_},
+                              std::string{record.file_}, record.line_});
+  }
+};
+
+// Install `sink` for the lifetime of the returned object and restore the
+// previously installed sink afterwards. A sink must never be destroyed while
+// it is installed, so all tests below have to use this.
+[[nodiscard]] auto scopedLogSink(ad_utility::LogSink* sink) {
+  auto* previous = ad_utility::setLogSink(sink);
+  return absl::Cleanup{[previous]() { ad_utility::setLogSink(previous); }};
+}
+
+}  // namespace
+
+// _____________________________________________________________________________
+// An installed `LogSink` gets the message without the prefix and without the
+// trailing newline, together with the metadata of the log statement.
+TEST(LogTest, LogSinkReceivesMessages) {
+  ENFORCE_LOG_LEVEL_OR_SKIP(ERROR);
+  auto [streamCleanup, ss] = setGlobalLoggingStreamToStringStream();
+  CollectingSink sink;
+  auto before = absl::Now();
+  {
+    auto sinkCleanup = scopedLogSink(&sink);
+    AD_LOG_ERROR << "hello " << 42 << std::endl;
+  }
+  const int expectedLine = __LINE__ - 2;
+
+  ASSERT_EQ(sink.records_.size(), 1);
+  const auto& record = sink.records_.at(0);
+  EXPECT_EQ(record.message_, "hello 42");
+  EXPECT_EQ(record.level_, LogLevel{LogLevel::Enum::ERROR});
+  EXPECT_THAT(record.file_, ::testing::EndsWith("LogTest.cpp"));
+  EXPECT_EQ(record.line_, expectedLine);
+  EXPECT_GE(record.timestamp_, before);
+  EXPECT_LE(record.timestamp_, absl::Now());
+
+  // The message still goes to the textual log, with the very same timestamp.
+  EXPECT_THAT(ss.str(), ::testing::HasSubstr("hello 42\n"));
+  EXPECT_THAT(ss.str(), ::testing::HasSubstr(ad_utility::Log::formatTimestamp(
+                            record.timestamp_)));
+}
+
+// _____________________________________________________________________________
+// `setLogSink` returns the previously installed sink, and after uninstalling a
+// sink it no longer receives messages.
+TEST(LogTest, SetLogSinkReturnsThePreviousSink) {
+  ENFORCE_LOG_LEVEL_OR_SKIP(ERROR);
+  auto [streamCleanup, ss] = setGlobalLoggingStreamToStringStream();
+  CollectingSink first;
+  CollectingSink second;
+  {
+    auto firstCleanup = scopedLogSink(&first);
+    {
+      auto secondCleanup = scopedLogSink(&second);
+      AD_LOG_ERROR << "to-the-second-sink" << std::endl;
+    }
+    AD_LOG_ERROR << "to-the-first-sink" << std::endl;
+  }
+  AD_LOG_ERROR << "to-no-sink" << std::endl;
+
+  ASSERT_EQ(first.records_.size(), 1);
+  EXPECT_EQ(first.records_.at(0).message_, "to-the-first-sink");
+  ASSERT_EQ(second.records_.size(), 1);
+  EXPECT_EQ(second.records_.at(0).message_, "to-the-second-sink");
+  // The textual log is unaffected by the (un)installing of the sinks.
+  EXPECT_THAT(ss.str(), ::testing::HasSubstr("to-no-sink"));
+}
+
+// _____________________________________________________________________________
+// Messages that are suppressed by the runtime log level never reach the sink.
+TEST(LogTest, LogSinkDoesNotSeeSuppressedMessages) {
+  ENFORCE_LOG_LEVEL_OR_SKIP(ERROR);
+  auto [streamCleanup, ss] = setGlobalLoggingStreamToStringStream();
+  CollectingSink sink;
+  {
+    auto sinkCleanup = scopedLogSink(&sink);
+    ad_utility::ScopedLogLevel scopedLogLevel{FATAL};
+    AD_LOG_ERROR << "suppressed" << std::endl;
+    AD_LOG_FATAL << "not-suppressed" << std::endl;
+  }
+
+  ASSERT_EQ(sink.records_.size(), 1);
+  EXPECT_EQ(sink.records_.at(0).message_, "not-suppressed");
+}
+
+// _____________________________________________________________________________
+// Messages that end in `\r` are in-place redraws of a `ProgressBar` on the
+// terminal, not log events of their own, and hence are not handed to the sink.
+TEST(LogTest, LogSinkIgnoresProgressBarRedraws) {
+  ENFORCE_LOG_LEVEL_OR_SKIP(ERROR);
+  auto [streamCleanup, ss] = setGlobalLoggingStreamToStringStream();
+  CollectingSink sink;
+  {
+    auto sinkCleanup = scopedLogSink(&sink);
+    AD_LOG_ERROR << "progress 50%\r";
+    AD_LOG_ERROR << "progress 100%" << std::endl;
+  }
+
+  ASSERT_EQ(sink.records_.size(), 1);
+  EXPECT_EQ(sink.records_.at(0).message_, "progress 100%");
+  // Both messages are still written to the textual log.
+  EXPECT_THAT(ss.str(), ::testing::HasSubstr("progress 50%\r"));
+}
+
+// _____________________________________________________________________________
+// A sink that logs itself neither deadlocks on the global log mutex nor
+// recurses infinitely; the nested message only goes to the textual log.
+TEST(LogTest, LogSinkMayLogItself) {
+  ENFORCE_LOG_LEVEL_OR_SKIP(ERROR);
+  auto [streamCleanup, ss] = setGlobalLoggingStreamToStringStream();
+  class LoggingSink : public ad_utility::LogSink {
+   public:
+    int numCalls_ = 0;
+    void emit(const ad_utility::LogRecord&) override {
+      ++numCalls_;
+      AD_LOG_ERROR << "from-inside-the-sink" << std::endl;
+    }
+  };
+  LoggingSink sink;
+  {
+    auto sinkCleanup = scopedLogSink(&sink);
+    AD_LOG_ERROR << "trigger" << std::endl;
+  }
+
+  EXPECT_EQ(sink.numCalls_, 1);
+  EXPECT_THAT(ss.str(), ::testing::HasSubstr("from-inside-the-sink"));
+}
+
+// _____________________________________________________________________________
+// The message that the sink sees is formatted exactly as in the textual log,
+// in particular with the locale that was set via `Log::imbue`.
+TEST(LogTest, LogSinkUsesTheLocaleOfTheLogStream) {
+  ENFORCE_LOG_LEVEL_OR_SKIP(ERROR);
+  auto [streamCleanup, ss] = setGlobalLoggingStreamToStringStream();
+  // Note: The locale is only imbued into the string stream that is currently
+  // used for logging, so this doesn't affect any other test.
+  ad_utility::Log::imbue(ad_utility::commaLocale);
+  CollectingSink sink;
+  {
+    auto sinkCleanup = scopedLogSink(&sink);
+    AD_LOG_ERROR << 1234567 << std::endl;
+  }
+
+  ASSERT_EQ(sink.records_.size(), 1);
+  EXPECT_EQ(sink.records_.at(0).message_, "1,234,567");
+  EXPECT_THAT(ss.str(), ::testing::HasSubstr("1,234,567"));
 }

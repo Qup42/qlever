@@ -24,6 +24,7 @@
 #include "util/ReadableNumberFacet.h"
 #include "util/ResourceMonitor.h"
 #include "util/http/HttpProxyConfig.h"
+#include "util/metrics/Logging.h"
 #include "util/metrics/Metrics.h"
 
 using std::size_t;
@@ -55,6 +56,7 @@ int main(int argc, char** argv) {
   bool noAccessCheck = false;
   unsigned short port;
   bool metricsEnabled = false;
+  bool logsEnabled = false;
   NonNegative numSimultaneousQueries = 1;
   bool noMetricsLog = false;
   bool noResourceUsageLog = false;
@@ -271,6 +273,13 @@ int main(int argc, char** argv) {
       "Enable metrics collection and expose a Prometheus /metrics endpoint on "
       "the main server port. Accessing the endpoint requires a valid access "
       "token.");
+  add("enable-logs", po::bool_switch(&logsEnabled)->default_value(false),
+      "Export the log messages via OpenTelemetry. They are still "
+      "printed to standard output as usual, and which of them are exported "
+      "follows the `log-level` parameter, exactly as for the printed log. The "
+      "destination is configured via the standard OTEL environment variables: "
+      "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT selects the endpoint that OTLP/HTTP "
+      "sends them to (http://localhost:4318/v1/logs by default).");
   std::vector<std::string> runtimeParameterAssignments;
   add("set-runtime-parameter",
       po::value<std::vector<std::string>>(&runtimeParameterAssignments)
@@ -310,6 +319,13 @@ int main(int argc, char** argv) {
     std::cerr << "Error in command-line argument: " << e.what() << '\n';
     std::cerr << options << '\n';
     return EXIT_FAILURE;
+  }
+
+  // Set up the export of log messages as early as possible, so that the startup
+  // messages below are exported as well.
+  ad_utility::logging::LoggingHandle loggingHandle;
+  if (logsEnabled) {
+    loggingHandle = ad_utility::logging::initialize();
   }
 
   AD_LOG_INFO << EMPH_ON << "QLever server " << qlever::version::ProjectVersion
