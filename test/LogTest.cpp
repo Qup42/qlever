@@ -566,7 +566,7 @@ TEST(LogTest, LogSinkDoesNotSeeSuppressedMessages) {
   CollectingSink sink;
   {
     auto sinkCleanup = scopedLogSink(&sink);
-    ad_utility::ScopedLogLevel scopedLogLevel{FATAL};
+    ad_utility::ScopedLogLevel scopedLogLevel{LogLevel::Enum::FATAL};
     AD_LOG_ERROR << "suppressed" << std::endl;
     AD_LOG_FATAL << "not-suppressed" << std::endl;
   }
